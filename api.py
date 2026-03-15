@@ -1,13 +1,14 @@
 import os
+import base64
 import time
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi import FastAPI, HTTPException, Query, Body, UploadFile, File, Form
 from pydantic import BaseModel
 from redis import Redis
 from rq import Queue
 from rq.job import Job, NoSuchJobError
 
-from tasks import ask_copilot
+from tasks import ask_copilot, ask_copilot_vision
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 
@@ -80,6 +81,52 @@ def models():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ── Vision endpoint ───────────────────────────────────────────────────────────
+
+SUPPORTED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+@app.post("/ask-image")
+async def ask_image(
+    prompt: str = Form(..., description="Question or instruction about the image"),
+    model: str = Form("gpt-4o", description="Vision model to use (gpt-4o or gpt-4o-mini)"),
+    file: UploadFile = File(..., description="Image file (JPEG, PNG, WEBP, GIF)"),
+):
+    """
+    Upload an image and ask a question about it.
+    Returns a job_id — poll /result/{job_id} for the answer.
+
+    Example with curl:
+        curl -X POST http://localhost:8000/ask-image \\
+          -F 'prompt=Describe what you see in this chart' \\
+          -F 'model=gpt-4o' \\
+          -F 'file=@/path/to/image.png'
+    """
+    mime_type = file.content_type or "image/jpeg"
+    if mime_type not in SUPPORTED_MIME:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported media type '{mime_type}'. Allowed: {sorted(SUPPORTED_MIME)}",
+        )
+
+    raw = await file.read()
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image exceeds 20 MB limit")
+
+    image_b64 = base64.b64encode(raw).decode()
+
+    job = queue.enqueue(
+        ask_copilot_vision,
+        prompt,
+        image_b64,
+        mime_type,
+        model,
+        job_timeout=180,
+    )
+    return {"job_id": job.id, "status": job.get_status(), "model_requested": model}
 
 
 # ── OpenAI-compatible endpoint ────────────────────────────────────────────────
