@@ -1,0 +1,57 @@
+# ── Shared environment ──────────────────────────────────────────────────────
+# GITHUB_TOKEN is injected automatically by entrypoint.sh from the mounted
+# ~/.config/gh directory (your existing `gh auth login` on the host).
+# You only need a .env file if you want to override the backend or model.
+x-common-env: &common-env
+  REDIS_URL: redis://redis:6379
+  # API backend:
+  #   https://models.inference.ai.azure.com  ← GitHub Models FREE tier (default)
+  #   https://api.githubcopilot.com          ← Copilot API (subscription required)
+  COPILOT_BASE_URL: ${COPILOT_BASE_URL:-https://models.inference.ai.azure.com}
+  # Default model (can be overridden per request via ?model= query param)
+  COPILOT_MODEL: ${COPILOT_MODEL:-gpt-4o-mini}
+
+services:
+  # ── Redis ──────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── FastAPI ────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+    volumes:
+      - "$HOME/.config/gh:/gh-config-ro:ro"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── RQ Worker ──────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python worker.py
+    environment:
+      <<: *common-env
+    volumes:
+      - "$HOME/.config/gh:/gh-config-ro:ro"
+    depends_on:
+      redis:
+        condition: service_healthy
