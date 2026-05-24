@@ -23,6 +23,8 @@ GitHub Models API  ─── free tier, rate-limited, $0
 GitHub Copilot API ─── included with Copilot subscription
 ```
 
+Public traffic reaches only Caddy (80/443). API and Redis stay internal to Docker network.
+
 ---
 
 ## Quick Start
@@ -50,6 +52,10 @@ cd docker-copilot-api
 # Optional: override backend or model (sensible defaults are already set)
 cp .env.example .env
 
+# REQUIRED in .env
+# API_KEY=<long-random-secret>
+# DOMAIN=api.your-domain.com
+
 docker compose up --build
 ```
 
@@ -70,11 +76,13 @@ Enqueues a prompt and returns a `job_id` immediately (non-blocking).
 
 **Example:**
 ```bash
-curl "http://localhost:8000/ask?prompt=write+a+bash+one-liner+to+find+large+files"
+curl -H "Authorization: Bearer $API_KEY" \
+  "https://$DOMAIN/ask?prompt=write+a+bash+one-liner+to+find+large+files"
 # → {"job_id": "abc123", "status": "queued", "model_requested": null}
 
 # With explicit model
-curl "http://localhost:8000/ask?prompt=explain+quicksort&model=gpt-4o"
+curl -H "Authorization: Bearer $API_KEY" \
+  "https://$DOMAIN/ask?prompt=explain+quicksort&model=gpt-4o"
 ```
 
 ---
@@ -84,7 +92,7 @@ curl "http://localhost:8000/ask?prompt=explain+quicksort&model=gpt-4o"
 Polls the status and result of a job.
 
 ```bash
-curl "http://localhost:8000/result/abc123"
+curl -H "Authorization: Bearer $API_KEY" "https://$DOMAIN/result/abc123"
 ```
 
 **Possible `status` values:**
@@ -120,7 +128,7 @@ curl "http://localhost:8000/result/abc123"
 Returns the list of available models split by backend.
 
 ```bash
-curl "http://localhost:8000/models"
+curl -H "Authorization: Bearer $API_KEY" "https://$DOMAIN/models"
 ```
 
 ---
@@ -130,7 +138,7 @@ curl "http://localhost:8000/models"
 Liveness check.
 
 ```bash
-curl "http://localhost:8000/health"
+curl "https://$DOMAIN/health"
 # → {"status": "ok"}
 ```
 
@@ -169,9 +177,74 @@ COPILOT_BASE_URL=https://models.inference.ai.azure.com   # GitHub Models, free t
 
 # Default model (overridable per-request)
 COPILOT_MODEL=gpt-4o-mini
+
+# Required security settings for public deployment
+API_KEY=replace-with-long-random-secret
+RATE_LIMIT_RPM=60
+PUBLIC_HEALTH=true
+
+# Domain handled by Caddy TLS
+DOMAIN=api.example.com
 ```
 
-`GITHUB_TOKEN` is **not** needed in `.env` — it is injected automatically from your host `gh` auth at container startup.
+`GITHUB_TOKEN` is optional in `.env` — by default it is injected from host `gh` auth at container startup.
+
+## VPS Deployment (Secure)
+
+1. Prepare DNS: create an A/AAAA record for `DOMAIN` pointing to the VPS IP.
+2. Firewall: open only `80/tcp` and `443/tcp`; do not expose `6379`.
+3. Install Docker + Compose plugin on the VPS.
+4. Copy project, then set `.env` with strong `API_KEY`, valid `DOMAIN`, model/backend.
+5. On VPS, run `gh auth login` (or set `GITHUB_TOKEN` in `.env`) so worker can call GitHub APIs.
+6. Start with `docker compose up -d --build`.
+7. Test:
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" "https://$DOMAIN/health"
+curl -H "Authorization: Bearer $API_KEY" "https://$DOMAIN/models"
+```
+
+Security defaults in this stack:
+- API key auth required on all API endpoints except optional public `/health`.
+- Per-key rate limit (`RATE_LIMIT_RPM`) enforced in API.
+- Redis not published to host network.
+- TLS termination and HTTPS certificates handled by Caddy.
+
+### Portainer compatibility (`:8000`)
+
+If your VPS already exposes Portainer on `:8000`, this setup is compatible as-is:
+
+- This stack exposes only `80/443` via Caddy.
+- The FastAPI container is internal only (no host `8000` bind).
+- Redis is internal only.
+
+So there is no conflict with Portainer on port `8000`.
+
+### Installation checklist (copy/paste)
+
+```bash
+# 1) Clone project
+git clone <your-repo-url>
+cd docker-copilot-api
+
+# 2) Prepare env
+cp .env.example .env
+# Edit .env and set at least:
+# API_KEY=<long-random-secret>
+# DOMAIN=api.yourdomain.com
+
+# 3) (Option A) Use gh auth from host (recommended)
+gh auth login
+
+# 4) Start stack
+docker compose up -d --build
+
+# 5) Verify
+curl "https://api.yourdomain.com/health"
+curl -H "Authorization: Bearer <API_KEY>" "https://api.yourdomain.com/models"
+```
+
+If you don't want `gh auth login` on VPS, you can set `GITHUB_TOKEN` directly in `.env`.
 
 ---
 
@@ -184,65 +257,11 @@ This API is **OpenAI-compatible** (same JSON schema). Services that support a cu
 [Open WebUI](https://github.com/open-webui/open-webui) supports custom OpenAI-compatible endpoints:
 
 1. Open WebUI → Settings → Connections → OpenAI API
-2. Set **API Base URL**: `http://localhost:8000`  
-   *(or `http://host.docker.internal:8000` if Open WebUI is itself in Docker)*
-3. Set **API Key**: any non-empty string (e.g. `copilot`)
+2. Set **API Base URL**: `https://$DOMAIN/v1`
+3. Set **API Key**: your `API_KEY`
 4. The model list will be populated from `/models`
 
-> **Note:** Open WebUI expects the standard `/v1/chat/completions` path.  
-> You can add a thin `/v1/chat/completions` proxy endpoint to `api.py` (see below).
-
----
-
-### Adding an OpenAI-compatible `/v1/chat/completions` endpoint
-
-To make this API a **drop-in replacement** for Ollama or any OpenAI-compatible client, add this to `api.py`:
-
-```python
-from fastapi import Body
-from pydantic import BaseModel
-from typing import Optional
-
-class ChatRequest(BaseModel):
-    model: Optional[str] = None
-    messages: list[dict]
-    stream: bool = False
-
-@app.post("/v1/chat/completions")
-def chat_completions(body: ChatRequest = Body(...)):
-    """
-    OpenAI-compatible synchronous endpoint.
-    Useful for clients like Open WebUI, LangChain, LlamaIndex, Continue.dev, etc.
-    """
-    prompt = "\n".join(
-        f"{m['role'].upper()}: {m['content']}" for m in body.messages
-    )
-    job = queue.enqueue(ask_copilot, prompt, body.model, job_timeout=120)
-
-    # Wait for result (synchronous, up to 30 s)
-    import time
-    for _ in range(60):
-        job.refresh()
-        if job.is_finished:
-            break
-        time.sleep(0.5)
-
-    result = job.result or {}
-    return {
-        "id": job.id,
-        "object": "chat.completion",
-        "model": result.get("model", body.model),
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": result.get("content", ""),
-            },
-            "finish_reason": "stop",
-        }],
-        "usage": result.get("usage", {}),
-    }
-```
+> **Note:** `/v1/chat/completions` is already implemented in this project.
 
 ---
 
@@ -252,8 +271,8 @@ def chat_completions(body: ChatRequest = Body(...)):
 from langchain_openai import ChatOpenAI
 
 llm = ChatOpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="copilot",          # any non-empty string
+  base_url="https://api.example.com/v1",
+  api_key="YOUR_API_KEY",
     model="gpt-4o-mini",
 )
 
@@ -274,8 +293,8 @@ In `~/.continue/config.json`:
       "title": "GitHub Copilot API (gpt-4o-mini)",
       "provider": "openai",
       "model": "gpt-4o-mini",
-      "apiBase": "http://localhost:8000/v1",
-      "apiKey": "copilot"
+      "apiBase": "https://api.example.com/v1",
+      "apiKey": "YOUR_API_KEY"
     }
   ]
 }
@@ -286,7 +305,8 @@ In `~/.continue/config.json`:
 ### curl (raw OpenAI-compatible call)
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl https://api.example.com/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o-mini",

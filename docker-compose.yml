@@ -4,6 +4,9 @@
 # You only need a .env file if you want to override the backend or model.
 x-common-env: &common-env
   REDIS_URL: redis://redis:6379
+  API_KEY: ${API_KEY}
+  RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-60}
+  PUBLIC_HEALTH: ${PUBLIC_HEALTH:-true}
   # API backend:
   #   https://models.inference.ai.azure.com  ← GitHub Models FREE tier (default)
   #   https://api.githubcopilot.com          ← Copilot API (subscription required)
@@ -12,17 +15,36 @@ x-common-env: &common-env
   COPILOT_MODEL: ${COPILOT_MODEL:-gpt-4o-mini}
 
 services:
-  # ── Redis ──────────────────────────────────────────────────────────────
+  # ── Reverse proxy (TLS termination) ────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - backend
+
+  # ── Redis (internal only) ──────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - backend
 
   # ── FastAPI ────────────────────────────────────────────────────────────
   api:
@@ -30,9 +52,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    command: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
-    ports:
-      - "8000:8000"
+    command: uvicorn api:app --host 0.0.0.0 --port 8000
     environment:
       <<: *common-env
     volumes:
@@ -40,6 +60,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    networks:
+      - backend
 
   # ── RQ Worker ──────────────────────────────────────────────────────────
   worker:
@@ -55,3 +77,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    networks:
+      - backend
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  backend:

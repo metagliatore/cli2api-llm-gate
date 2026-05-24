@@ -1,8 +1,9 @@
 import os
 import base64
 import time
+import hashlib
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Query, Body, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Query, Body, UploadFile, File, Form, Depends, Header, Request
 from pydantic import BaseModel
 from redis import Redis
 from rq import Queue
@@ -11,6 +12,9 @@ from rq.job import Job, NoSuchJobError
 from tasks import ask_copilot, ask_copilot_vision
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
+API_KEY = os.getenv("API_KEY", "")
+RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "60"))
+PUBLIC_HEALTH = os.getenv("PUBLIC_HEALTH", "true").lower() == "true"
 
 app = FastAPI(title="GitHub Copilot API", version="2.0.0")
 
@@ -18,8 +22,43 @@ redis_conn = Redis.from_url(REDIS_URL)
 queue = Queue("copilot", connection=redis_conn)
 
 
+def _extract_api_key(
+    authorization: str | None,
+    x_api_key: str | None,
+) -> str | None:
+    if x_api_key:
+        return x_api_key.strip()
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return None
+
+
+def auth_and_rate_limit(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+):
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API_KEY is not configured on the server")
+
+    provided_key = _extract_api_key(authorization, x_api_key)
+    if provided_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    key_fingerprint = hashlib.sha256(provided_key.encode()).hexdigest()[:16]
+    limiter_key = f"ratelimit:{key_fingerprint}:{int(time.time() // 60)}"
+    current = redis_conn.incr(limiter_key)
+    if current == 1:
+        redis_conn.expire(limiter_key, 61)
+    if current > RATE_LIMIT_RPM:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    request.state.api_key_fingerprint = key_fingerprint
+
+
 @app.get("/ask")
 def ask(
+    _: None = Depends(auth_and_rate_limit),
     prompt: str = Query(..., description="Natural-language prompt for Copilot"),
     model: str | None = Query(
         None,
@@ -38,7 +77,7 @@ def ask(
 
 
 @app.get("/result/{job_id}")
-def result(job_id: str):
+def result(job_id: str, _: None = Depends(auth_and_rate_limit)):
     """Poll the status and result of a previously enqueued job."""
     try:
         job = Job.fetch(job_id, connection=redis_conn)
@@ -57,7 +96,7 @@ def result(job_id: str):
 
 
 @app.get("/models")
-def models():
+def models(_: None = Depends(auth_and_rate_limit)):
     """Return the list of suggested available models."""
     return {
         "github_models_free_tier": [
@@ -79,7 +118,14 @@ def models():
 
 
 @app.get("/health")
-def health():
+def health(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+):
+    if not PUBLIC_HEALTH:
+        provided_key = _extract_api_key(authorization, x_api_key)
+        if not API_KEY or provided_key != API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid API key")
     return {"status": "ok"}
 
 
@@ -91,6 +137,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
 
 @app.post("/ask-image")
 async def ask_image(
+    _: None = Depends(auth_and_rate_limit),
     prompt: str = Form(..., description="Question or instruction about the image"),
     model: str = Form("gpt-4o", description="Vision model to use (gpt-4o or gpt-4o-mini)"),
     file: UploadFile = File(..., description="Image file (JPEG, PNG, WEBP, GIF)"),
@@ -142,7 +189,7 @@ class ChatRequest(BaseModel):
     stream: bool = False
 
 @app.post("/v1/chat/completions")
-def chat_completions(body: ChatRequest = Body(...)):
+def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_rate_limit)):
     """
     OpenAI-compatible synchronous chat endpoint.
     Waits up to 60 s for the worker to return a result.
