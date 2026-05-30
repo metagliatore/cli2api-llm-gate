@@ -179,6 +179,10 @@ COPILOT_BASE_URL=https://models.inference.ai.azure.com   # GitHub Models, free t
 COPILOT_MODEL=gpt-4o-mini
 
 # Required security settings for public deployment
+# Multi-client tokens (recommended)
+API_KEYS=token_home_assistant,token_n8n,token_phone
+
+# Optional single token (backward compatibility)
 API_KEY=replace-with-long-random-secret
 RATE_LIMIT_RPM=60
 PUBLIC_HEALTH=true
@@ -209,6 +213,35 @@ Security defaults in this stack:
 - Per-key rate limit (`RATE_LIMIT_RPM`) enforced in API.
 - Redis not published to host network.
 - TLS termination and HTTPS certificates handled by Caddy.
+
+### Multiple API tokens (one per client)
+
+You can configure multiple authentication tokens for different clients.
+
+In `.env`:
+
+```env
+# Recommended: one token per client
+API_KEYS=token_home_assistant,token_n8n,token_phone
+
+# Optional backward-compatible single token
+API_KEY=legacy_single_token
+```
+
+Behavior:
+- If `API_KEYS` is set, any token in the comma-separated list is valid.
+- `API_KEY` is still accepted for backward compatibility.
+- If both are set, the API accepts tokens from both.
+
+Examples:
+
+```bash
+# Home Assistant token
+curl -H "Authorization: Bearer token_home_assistant" "https://$DOMAIN/models"
+
+# n8n token
+curl -H "Authorization: Bearer token_n8n" "https://$DOMAIN/models"
+```
 
 ### Portainer compatibility (`:8000`)
 

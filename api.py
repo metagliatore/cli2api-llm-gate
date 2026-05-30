@@ -13,6 +13,7 @@ from tasks import ask_copilot, ask_copilot_vision
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 API_KEY = os.getenv("API_KEY", "")
+API_KEYS = os.getenv("API_KEYS", "")
 RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "60"))
 PUBLIC_HEALTH = os.getenv("PUBLIC_HEALTH", "true").lower() == "true"
 
@@ -20,6 +21,25 @@ app = FastAPI(title="GitHub Copilot API", version="2.0.0")
 
 redis_conn = Redis.from_url(REDIS_URL)
 queue = Queue("copilot", connection=redis_conn)
+
+
+def _get_valid_api_keys() -> set[str]:
+    """
+    Return all valid API keys.
+
+    Priority:
+    1) API_KEYS (comma-separated): key1,key2,key3
+    2) API_KEY (single key, backward compatibility)
+    """
+    keys: set[str] = set()
+
+    if API_KEYS:
+        keys.update(k.strip() for k in API_KEYS.split(",") if k.strip())
+
+    if API_KEY:
+        keys.add(API_KEY.strip())
+
+    return keys
 
 
 def _extract_api_key(
@@ -38,11 +58,15 @@ def auth_and_rate_limit(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ):
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="API_KEY is not configured on the server")
+    valid_keys = _get_valid_api_keys()
+    if not valid_keys:
+        raise HTTPException(
+            status_code=500,
+            detail="No API key configured. Set API_KEYS or API_KEY on the server",
+        )
 
     provided_key = _extract_api_key(authorization, x_api_key)
-    if provided_key != API_KEY:
+    if not provided_key or provided_key not in valid_keys:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     key_fingerprint = hashlib.sha256(provided_key.encode()).hexdigest()[:16]
@@ -123,8 +147,9 @@ def health(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ):
     if not PUBLIC_HEALTH:
+        valid_keys = _get_valid_api_keys()
         provided_key = _extract_api_key(authorization, x_api_key)
-        if not API_KEY or provided_key != API_KEY:
+        if not valid_keys or not provided_key or provided_key not in valid_keys:
             raise HTTPException(status_code=401, detail="Invalid API key")
     return {"status": "ok"}
 

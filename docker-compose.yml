@@ -4,6 +4,7 @@
 # You only need a .env file if you want to override the backend or model.
 x-common-env: &common-env
   REDIS_URL: redis://redis:6379
+  API_KEYS: ${API_KEYS:-}
   API_KEY: ${API_KEY}
   RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-60}
   PUBLIC_HEALTH: ${PUBLIC_HEALTH:-true}
