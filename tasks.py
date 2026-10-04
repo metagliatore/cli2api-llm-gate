@@ -180,7 +180,16 @@ def ask_antigravity(
 ) -> dict:
     """Execute non-interactive prompt using the agy CLI."""
     agy_bin = _find_agy_bin()
-    chosen_model = model or os.getenv("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
+    default_model = os.getenv("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
+    if model and not is_antigravity_model(model):
+        logger.info(
+            "Model '%s' is not a native Antigravity model; mapping to default '%s'",
+            model,
+            default_model,
+        )
+        chosen_model = default_model
+    else:
+        chosen_model = model or default_model
     chosen_effort = effort or os.getenv("ANTIGRAVITY_EFFORT")
 
     cmd = [
