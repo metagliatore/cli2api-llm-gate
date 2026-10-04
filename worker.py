@@ -3,7 +3,7 @@ from redis import Redis
 from rq import Worker, Queue
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
-QUEUES = ["copilot"]
+QUEUES = ["copilot", "antigravity", "default"]
 
 
 if __name__ == "__main__":
