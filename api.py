@@ -264,8 +264,8 @@ def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_r
 
     job = queue.enqueue(dispatch_ask, prompt, body.model, target_provider, job_timeout=180)
 
-    # Poll until finished or timeout
-    for _ in range(120):
+    # Poll until finished or timeout (up to 180s)
+    for _ in range(360):
         job.refresh()
         if job.is_finished or job.is_failed:
             break
@@ -273,6 +273,12 @@ def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_r
 
     if job.is_failed:
         raise HTTPException(status_code=500, detail=str(job.exc_info))
+
+    if not job.is_finished:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Job '{job.id}' timed out after 180s. You can poll /result/{job.id} for the result once ready.",
+        )
 
     result = job.result or {}
     if "error" in result and result.get("error"):
