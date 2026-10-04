@@ -1,7 +1,7 @@
-# Progetto: Multi-Provider AI HTTP API (`docker-copilot-api`)
+# Progetto: cli2api-ai (Multi-Provider AI HTTP Gateway)
 **File di Memoria del Progetto (MEMORY.md)**  
 *Data ultimo aggiornamento: Ottobre 2026*  
-*Fornitori supportati: GitHub Copilot / GitHub Models e Google Antigravity (`agy`)*
+*Fornitori supportati: Google Antigravity (`agy`) e GitHub Copilot / GitHub Models*
 
 ---
 

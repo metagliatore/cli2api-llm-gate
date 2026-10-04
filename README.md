@@ -1,4 +1,6 @@
-# Multi-Provider AI HTTP Gateway
+# cli2api-ai
+
+> **Transform Host CLI AI Tools (Google Antigravity & GitHub Copilot) into a Multi-Provider, OpenAI-Compatible HTTP Gateway.**
 
 A minimal, production-ready microservice that bridges **Google Antigravity (`agy`)** and **GitHub Copilot / GitHub Models** into a unified, **OpenAI-compatible HTTP API**.
 
@@ -57,8 +59,8 @@ Public traffic reaches only Caddy (80/443). FastAPI and Redis stay internal to t
 ### 2. Clone and start
 
 ```bash
-git clone <this-repo>
-cd docker-copilot-api
+git clone <this-repo> cli2api-ai
+cd cli2api-ai
 
 # Create your .env from the template
 cp .env.example .env

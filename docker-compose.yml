@@ -1,3 +1,5 @@
+name: cli2api-ai
+
 # ── Shared environment ──────────────────────────────────────────────────────
 # Auth is injected automatically:
 #   - Copilot: entrypoint.sh extracts host `gh auth login` from ~/.config/gh
