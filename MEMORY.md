@@ -1,190 +1,189 @@
-# Progetto: cli2api-ai (Multi-Provider AI HTTP Gateway)
-**File di Memoria del Progetto (MEMORY.md)**  
-*Data ultimo aggiornamento: Ottobre 2026*  
-*Fornitori supportati: Google Antigravity (`agy`) e GitHub Copilot / GitHub Models*
+# Project: cli2api-ai (Multi-Provider AI HTTP Gateway)
+**Project Architecture & Technical Memory (MEMORY.md)**  
+*Last updated: October 2026*  
+*Supported Providers: Google Antigravity (`agy`) and GitHub Copilot / GitHub Models*
 
 ---
 
-## 1. Panoramica del Progetto
+## 1. Project Overview
 
-Il progetto è un microservizio containerizzato e pronto per la produzione che espone i modelli AI di **GitHub Copilot / GitHub Models** e di **Google Antigravity (`agy`)** attraverso un'interfaccia HTTP unificata, RESTful e compatibile con lo standard OpenAI (`/v1/chat/completions`).
+**cli2api-ai** is a production-ready containerized microservice that exposes AI models from **Google Antigravity (`agy`)** and **GitHub Copilot / GitHub Models** via a unified, RESTful, and OpenAI-compatible HTTP API (`/v1/chat/completions`).
 
-### Obiettivi Chiave
-- **Fornitori multipli selezionabili da configurazione o richiesta**:
-  - `copilot`: GitHub Models (Free Tier su Azure AI Inference) o GitHub Copilot API.
-  - `antigravity`: Google Antigravity tramite la CLI `agy` presente sulla macchina host (modelli Gemini 3.8 Flash, Gemini 3.1 Pro, Claude Sonnet 4.6 Thinking, Claude Opus 4.6 Thinking, ecc.).
-- **Zero gestione credenziali esterne per i client**:
-  - I token GitHub vengono ereditati dal mount di `$HOME/.config/gh` via `gh auth login`.
-  - La sessione Antigravity viene ereditata dal mount di `$HOME/.gemini` dell'host.
-  - I client esterni (Home Assistant, n8n, Open WebUI, Continue.dev, curl, mobile) usano token Bearer interni definiti in `.env` (`API_KEYS`).
-- **Doppia modalità di consumo**:
-  - *Asincrona con code Redis (RQ)*: per prompt lunghi o task di elaborazione visiva (`/ask`, `/ask-image`, `/result/{job_id}`).
-  - *Sincrona compatibile OpenAI*: drop-in replacement immediato per qualsiasi client che supporti base URL custom (`/v1/chat/completions`).
-- **Sicurezza da produzione su VPS**:
-  - Reverse proxy Caddy con HTTPS/TLS automatico (porte `80`/`443`).
-  - Porte interne (`8000` di FastAPI e `6379` di Redis) isolate nella rete Docker `backend` (nessun conflitto con Portainer su `:8000`).
-  - Rate limiting per singolo token API su bucket Redis al minuto (`RATE_LIMIT_RPM`).
-- **Retrocompatibilità trasparente al 100% per i client esistenti**:
-  - Se un applicativo legacy invia modelli Copilot/OpenAI (es. `gpt-4o-mini`, `gpt-4o`) mentre il provider attivo è `antigravity`, il worker mappa automaticamente la richiesta sul modello Antigravity di default (`gemini-3.8-flash-high`) senza rompere i client esistenti.
-  - L'endpoint sincrono `/v1/chat/completions` gestisce il polling fino a 180s per i modelli Antigravity con reasoning elevato.
+### Key Goals & Features
+- **Multi-Provider Architecture**:
+  - `antigravity`: Google Antigravity using the `agy` CLI binary authenticated on the host (Gemini 3.8 Flash, Gemini 3.1 Pro, Claude Sonnet 4.6 Thinking, Claude Opus 4.6 Thinking, GPT-OSS 120B).
+  - `copilot`: GitHub Models (Free Tier on Azure AI Inference) or GitHub Copilot API.
+- **Zero External Credential Management for Clients**:
+  - GitHub tokens are extracted from the host mount of `$HOME/.config/gh` via `gh auth login`.
+  - Antigravity sessions are inherited from the host mount of `$HOME/.gemini`.
+  - External clients (Home Assistant, n8n, Open WebUI, Continue.dev, curl, mobile apps) use internal Bearer tokens configured in `.env` (`API_KEYS`).
+- **Dual Consumption Modes**:
+  - *Asynchronous with Redis Queue (RQ)*: for long-running prompts or image analysis (`/ask`, `/ask-image`, `/result/{job_id}`).
+  - *Synchronous OpenAI-Compatible*: drop-in replacement for any client supporting custom base URLs (`/v1/chat/completions`).
+- **Production-Grade VPS Security**:
+  - Caddy reverse proxy with automated TLS/HTTPS certificates (ports `80`/`443`).
+  - Internal application ports (`8000` for FastAPI, `6379` for Redis) isolated within the Docker `backend` network (preventing conflicts with Portainer or other services on `:8000`).
+  - Per-token rate limiting backed by Redis sliding minute buckets (`RATE_LIMIT_RPM`).
+- **100% Backward-Compatible Model Aliasing**:
+  - If a legacy client requests Copilot/OpenAI models (e.g. `gpt-4o-mini`, `gpt-4o`) while the active provider is `antigravity`, the worker transparently aliases the request to the default Antigravity model (`gemini-3.8-flash-high`) without breaking clients.
+  - The synchronous `/v1/chat/completions` endpoint polls for up to 180s to accommodate deep reasoning models.
 
 ---
 
-## 2. Architettura del Sistema
+## 2. System Architecture
 
 ```
-                      INTERNET / CLIENTS
-                              │
-               (HTTPS: 443 / HTTP: 80 - TLS Automatico)
-                              ▼
-                     ┌──────────────────┐
-                     │  Caddy Container │ (Caddy 2-alpine)
-                     │ (Reverse Proxy)  │ - Headers di sicurezza
-                     └────────┬─────────┘
-                              │ Rete interna Docker ('backend')
-                              ▼
-                     ┌──────────────────┐
-                     │  FastAPI (api)   │ Port :8000 interna (non bindata su host)
-                     │                  │ - Autenticazione multi-Bearer (API_KEYS)
-                     │                  │ - Rate-limiter su Redis (RATE_LIMIT_RPM)
-                     │                  │ - Routing del provider (env o per-request)
-                     └────┬────────┬────┘
-                          │        │
-             Enqueue jobs │        │ Rate-limit counter / fetch status
-                          ▼        ▼
-                     ┌──────────────────┐
-                     │ Redis Container  │ (Redis 7-alpine)
-                     │ (Internal only)  │ Coda: 'copilot', 'antigravity'
-                     └────────▲─────────┘
-                              │
-                              │ Dequeue & esecuzione task
-                     ┌────────┴─────────┐
-                     │ RQ Worker        │ Scalabile orizzontalmente (--scale worker=N)
-                     │ (worker.py)      │ Monta ~/.config/gh e ~/.gemini
-                     └────────┬─────────┘
-                              │
-            ┌─────────────────┴─────────────────┐
-            │                                   │
-      [PROVIDER=copilot]              [PROVIDER=antigravity]
-            │                                   │
-            ▼                                   ▼
-   OpenAI Python SDK                    agy CLI Subprocess
-   (GitHub Models / Copilot API)        (--output-format json)
-            │                                   │
-   • gpt-4o-mini ($0)                   • gemini-3.8-flash-high (1M context)
-   • gpt-4o                             • claude-sonnet-4-6 (Thinking)
-   • meta-llama-3.1-70b                 • claude-opus-4-6-thinking
-   • claude-sonnet-4-5 (Copilot sub)    • gemini-3.1-pro-high
+                                INTERNET / CLIENTS
+                                        │
+                         (HTTPS: 443 / HTTP: 80 - Automated TLS)
+                                        ▼
+                               ┌──────────────────┐
+                               │  Caddy Container │ (Caddy 2-alpine)
+                               │ (Reverse Proxy)  │ - Security headers
+                               └────────┬─────────┘
+                                        │ Docker internal network ('backend')
+                                        ▼
+                               ┌──────────────────┐
+                               │  FastAPI (api)   │ Port :8000 internal (not bound to host)
+                               │                  │ - Multi-Bearer token authentication (API_KEYS)
+                               │                  │ - Redis rate limiter (RATE_LIMIT_RPM)
+                               │                  │ - Dynamic provider routing (env or per-request)
+                               └────┬────────┬────┘
+                                    │        │
+                       Enqueue jobs │        │ Rate-limit counter / fetch status
+                                    ▼        ▼
+                               ┌──────────────────┐
+                               │ Redis Container  │ (Redis 7-alpine)
+                               │ (Internal only)  │ Queues: 'copilot', 'antigravity', 'default'
+                               └────────▲─────────┘
+                                        │
+                                        │ Dequeue & execute tasks
+                               ┌────────┴─────────┐
+                               │ RQ Worker        │ Scalable horizontally (--scale worker=N)
+                               │ (worker.py)      │ Mounts ~/.config/gh and ~/.gemini
+                               └────────┬─────────┘
+                                        │
+                      ┌─────────────────┴─────────────────┐
+                      │                                   │
+                [PROVIDER=copilot]              [PROVIDER=antigravity]
+                      │                                   │
+                      ▼                                   ▼
+             OpenAI Python SDK                    agy CLI Subprocess
+             (GitHub Models / Copilot API)        (--output-format json)
+                      │                                   │
+             • gpt-4o-mini ($0)                   • gemini-3.8-flash-high (1M context)
+             • gpt-4o                             • claude-sonnet-4-6 (Thinking)
+             • meta-llama-3.1-70b                 • claude-opus-4-6-thinking
+             • claude-sonnet-4-5 (Copilot sub)    • gemini-3.1-pro-high
 ```
 
 ---
 
-## 3. Mappa dei File e Responsabilità
+## 3. File Map & Responsibilities
 
-| File | Ruolo / Descrizione |
+| File | Role / Description |
 |---|---|
-| [`api.py`](api.py) | **Applicazione FastAPI**: definisce gli endpoint (`/ask`, `/result/{job_id}`, `/ask-image`, `/v1/chat/completions`, `/models`, `/health`), gestisce validazione, rate-limiting e instradamento al dispatcher opportuno. |
-| [`tasks.py`](tasks.py) | **Logica di elaborazione RQ**: funzioni `dispatch_ask()`, `ask_antigravity()`, `ask_antigravity_vision()`, `ask_copilot()`, `ask_copilot_vision()`. Riconosce i modelli e invoca il backend appropriato. |
-| [`worker.py`](worker.py) | **Processo Worker RQ**: effettua il polling sulle code Redis `copilot` e `antigravity`, eseguendo i job accodati. |
-| [`Caddyfile`](Caddyfile) | **Configurazione Caddy**: binding del dominio `${DOMAIN}`, compressione (`zstd`, `gzip`), reverse proxy su `api:8000` e hardening HTTP. |
-| [`docker-compose.yml`](docker-compose.yml) | **Orchestrazione container**: 4 servizi (`caddy`, `redis`, `api`, `worker`), mount volumi di autenticazione (`$HOME/.config/gh` e `$HOME/.gemini`), network isolata `backend`. |
-| [`Dockerfile`](Dockerfile) | **Immagine Docker (Python 3.11-slim)**: installa `gh` CLI, esporta `/root/.gemini/bin` in PATH, installa `requirements.txt` e configura `entrypoint.sh`. |
-| [`entrypoint.sh`](entrypoint.sh) | **Script di avvio container**: verifica presenza e validità di `gh auth token` per Copilot e del binario `agy` per Antigravity. |
-| [`requirements.txt`](requirements.txt) | **Dipendenze Python**: `fastapi`, `uvicorn[standard]`, `redis`, `rq`, `openai`, `python-multipart`. |
-| [`.env.example`](.env.example) | Template di configurazione con parametri provider, modelli di default, chiavi di sicurezza, domini e rate limit. |
-| [`.env`](.env) | Configurazione locale dell'istanza. |
-| [`README.md`](README.md) | Documentazione completa per sviluppatori e guida all'integrazione con client terzi. |
+| [`api.py`](api.py) | **FastAPI Application**: defines endpoints (`/ask`, `/result/{job_id}`, `/ask-image`, `/v1/chat/completions`, `/models`, `/health`), manages authentication, rate limiting, and request dispatching. |
+| [`tasks.py`](tasks.py) | **RQ Task Logic**: implements `dispatch_ask()`, `ask_antigravity()`, `ask_antigravity_vision()`, `ask_copilot()`, `ask_copilot_vision()`. Resolves models and invokes the appropriate backend. |
+| [`worker.py`](worker.py) | **RQ Worker Process**: polls Redis queues `copilot`, `antigravity`, and `default`, executing enqueued jobs. |
+| [`Caddyfile`](Caddyfile) | **Caddy Reverse Proxy Configuration**: binds domain `${DOMAIN}`, compression (`zstd`, `gzip`), proxies to `api:8000`, and adds HTTP security headers. |
+| [`docker-compose.yml`](docker-compose.yml) | **Container Orchestration**: 4 services (`caddy`, `redis`, `api`, `worker`), volume mounts for host authentication (`$HOME/.config/gh` and `$HOME/.gemini`), isolated `backend` network. |
+| [`Dockerfile`](Dockerfile) | **Docker Image (Python 3.11-slim)**: installs `gh` CLI, adds `/root/.gemini/bin` to `PATH`, installs `requirements.txt`, and configures `entrypoint.sh`. |
+| [`entrypoint.sh`](entrypoint.sh) | **Container Entrypoint**: validates `gh auth token` for Copilot and detects the `agy` binary for Antigravity. |
+| [`requirements.txt`](requirements.txt) | **Python Dependencies**: `fastapi`, `uvicorn[standard]`, `redis`, `rq`, `openai`, `python-multipart`. |
+| [`.env.example`](.env.example) | Configuration template for provider settings, default models, security keys, domains, and rate limits. |
+| [`.env`](.env) | Instance environment configuration (git-ignored). |
+| [`README.md`](README.md) | Complete user and developer documentation for quickstart, usage, and client integration. |
 
 ---
 
-## 4. Modalità di Selezione del Provider
+## 4. Provider Selection & Routing Logic
 
-La selezione del fornitore segue una logica a cascata flessibile:
+Provider resolution follows a flexible cascading order:
 
-1. **Parametro esplicito nella richiesta**:
-   - `GET /ask?prompt=...&provider=antigravity` (o `provider=copilot`)
-   - `POST /ask-image` con campo form `provider`
-2. **Rilevamento automatico dal modello richiesto**:
-   - Se il modello inizia con `gemini-`, `claude-sonnet-4-6`, `claude-opus-4-6` o `gpt-oss-`, il sistema instrada automaticamente verso **Google Antigravity**.
-   - Se il modello è un modello GitHub/Azure noto (`gpt-4o`, `gpt-4o-mini`, `meta-llama-...`), instrada verso **Copilot**.
-3. **Valore predefinito in `.env` (`PROVIDER`)**:
-   - `PROVIDER=copilot` (default storico, retrocompatibile)
-   - `PROVIDER=antigravity` (per usare Antigravity come fornitore predefinito dell'intera istanza).
+1. **Explicit Query/Form Parameter**:
+   - `GET /ask?prompt=...&provider=antigravity` (or `provider=copilot`)
+   - `POST /ask-image` with form field `provider`
+2. **Automatic Detection from Model Name**:
+   - Models starting with `gemini-`, `claude-sonnet-4-6`, `claude-opus-4-6`, or `gpt-oss-` automatically route to **Google Antigravity**.
+   - Known GitHub/Azure models (`gpt-4o`, `gpt-4o-mini`, `meta-llama-...`) route according to `PROVIDER`.
+3. **Default Environment Variable (`PROVIDER`)**:
+   - `PROVIDER=copilot` (default for Copilot-focused instances).
+   - `PROVIDER=antigravity` (default for Antigravity-focused instances).
 
 ---
 
-## 5. Dettaglio dei Modelli e Fornitori
+## 5. Model & Provider Details
 
 ### Provider: Google Antigravity (`agy`)
-- Esegue `/root/.gemini/bin/agy -p "<prompt>" --model <model> --output-format json --dangerously-skip-permissions --disable-slash-commands`.
-- Modelli supportati:
-  - `gemini-3.8-flash-high` (*Default Antigravity*, latenza ~2s, reasoning rapido, contesto 1M+)
+- Executes `/root/.gemini/bin/agy -p "<prompt>" --model <model> --output-format json --dangerously-skip-permissions --disable-slash-commands`.
+- Supported Models:
+  - `gemini-3.8-flash-high` (*Default Antigravity*, ~2s latency, fast reasoning, 1M+ context window)
   - `gemini-3.8-flash-medium`
   - `gemini-3.8-flash-low`
   - `gemini-3.7-flash-high`
-  - `gemini-3.1-pro-high` (ragionamento approfondito)
-  - `claude-sonnet-4-6` (Thinking abilitato)
-  - `claude-opus-4-6-thinking` (Thinking abilitato)
+  - `gemini-3.1-pro-high` (deep reasoning)
+  - `claude-sonnet-4-6` (Thinking enabled)
+  - `claude-opus-4-6-thinking` (Thinking enabled)
   - `gpt-oss-120b-medium`
-- Supporto Vision: le immagini inviate a `/ask-image` vengono salvate temporaneamente su file e passate con istruzione contestuale ad `agy`, sfruttando le capacità visive native dell'agente.
+- Vision Support: images uploaded to `/ask-image` are written to temporary files and referenced in the prompt passed to `agy`, leveraging the agent's native visual analysis.
 
 ### Provider: GitHub Copilot / Models
-- Esegue chiamate client OpenAI su Azure AI Inference (`COPILOT_BASE_URL`).
-- Modelli supportati:
-  - Free tier: `gpt-4o-mini`, `gpt-4o`, `meta-llama-3.1-8b-instruct`, `meta-llama-3.1-70b-instruct`, `phi-4`.
-  - Copilot Sub: `gpt-4o-mini`, `gpt-4o`, `o1-mini`, `claude-sonnet-4-5`.
+- Executes OpenAI client calls against Azure AI Inference (`COPILOT_BASE_URL`).
+- Supported Models:
+  - Free Tier: `gpt-4o-mini`, `gpt-4o`, `meta-llama-3.1-8b-instruct`, `meta-llama-3.1-70b-instruct`, `phi-4`.
+  - Copilot Subscription: `gpt-4o-mini`, `gpt-4o`, `o1-mini`, `claude-sonnet-4-5`.
 
 ---
 
-## 6. Sicurezza e Autenticazione Client
+## 6. Security & Client Authentication
 
-- **Multi-Token (`API_KEYS`)**: comma-separated tokens in `.env` (`token_ha,token_n8n,token_mobile`).
-- **Single-Token (`API_KEY`)**: retrocompatibilità.
-- **Header supportati**: `Authorization: Bearer <token>` oppure `X-API-Key: <token>`.
-- **Rate Limit**: memorizzato in Redis come `ratelimit:<sha256_hash_16>:<minuto_unix>`. Superato `RATE_LIMIT_RPM`, restituisce HTTP 429.
-- **Portainer Safe**: nessun bind su porta 8000 host.
+- **Multi-Token (`API_KEYS`)**: comma-separated tokens in `.env` (e.g. `token_ha,token_n8n,token_mobile`).
+- **Single-Token (`API_KEY`)**: backward compatibility.
+- **Supported Headers**: `Authorization: Bearer <token>` or `X-API-Key: <token>`.
+- **Rate Limiting**: stored in Redis as `ratelimit:<sha256_hash_16>:<unix_minute>`. Requests exceeding `RATE_LIMIT_RPM` receive HTTP 429.
+- **Portainer-Safe**: no host port binding for port 8000; only Caddy binds `80` and `443`.
 
 ---
 
-## 7. Variabili d'Ambiente Principali
+## 7. Key Environment Variables
 
-| Variabile | Default | Descrizione |
+| Variable | Default | Description |
 |---|---|---|
-| `PROVIDER` | `copilot` | Fornitore attivo predefinito (`copilot` o `antigravity`) |
-| `ANTIGRAVITY_MODEL` | `gemini-3.8-flash-high` | Modello di default per Antigravity |
-| `ANTIGRAVITY_EFFORT` | *vuoto* | Livello di effort di ragionamento (`low`, `medium`, `high`, `xhigh`) |
-| `AGY_PATH` | *auto* | Percorso opzionale al binario `agy` (default `/root/.gemini/bin/agy`) |
-| `COPILOT_BASE_URL` | `https://models.inference.ai.azure.com` | Base URL inference GitHub / Copilot |
-| `COPILOT_MODEL` | `gpt-4o-mini` | Modello di default per Copilot |
-| `API_KEYS` | *vuoto* | Token multipli separati da virgola |
-| `API_KEY` | *vuoto* | Token singolo |
-| `RATE_LIMIT_RPM` | `60` | Richieste per minuto per chiave |
-| `PUBLIC_HEALTH` | `true` | Rende `/health` accessibile senza Bearer |
-| `DOMAIN` | `localhost` | Dominio Caddy TLS |
+| `PROVIDER` | `copilot` | Active default provider (`copilot` or `antigravity`) |
+| `ANTIGRAVITY_MODEL` | `gemini-3.8-flash-high` | Default model for Antigravity |
+| `ANTIGRAVITY_EFFORT` | *empty* | Reasoning effort level (`low`, `medium`, `high`, `xhigh`) |
+| `AGY_PATH` | *auto* | Optional custom path to `agy` binary (defaults to `~/.gemini/bin/agy` or `/root/.gemini/bin/agy`) |
+| `COPILOT_BASE_URL` | `https://models.inference.ai.azure.com` | GitHub / Azure AI Inference base URL |
+| `COPILOT_MODEL` | `gpt-4o-mini` | Default model for Copilot |
+| `API_KEYS` | *empty* | Comma-separated API tokens for multiple clients |
+| `API_KEY` | *empty* | Single legacy API token |
+| `RATE_LIMIT_RPM` | `60` | Maximum requests per minute per token |
+| `PUBLIC_HEALTH` | `true` | Makes `/health` accessible without authentication |
+| `DOMAIN` | `localhost` | Domain name for Caddy automatic TLS certificates |
 
 ---
 
-## 8. Comandi di Esempio
+## 8. Example Commands
 
 ```bash
-# Avvio dello stack
+# Start the stack
 docker compose up -d --build
 
-# Chiamata con provider Antigravity esplicito
+# Ask query specifying Antigravity provider
 curl -H "Authorization: Bearer <TOKEN>" \
-  "https://<DOMAIN>/ask?prompt=Spiega+la+teoria+della+relativita&model=gemini-3.8-flash-high&provider=antigravity"
+  "https://<DOMAIN>/ask?prompt=Explain+special+relativity&model=gemini-3.8-flash-high&provider=antigravity"
 
-# Chiamata OpenAI-compatibile a Claude Sonnet tramite Antigravity
+# OpenAI-compatible call to Claude Sonnet via Antigravity
 curl https://<DOMAIN>/v1/chat/completions \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-sonnet-4-6",
-    "messages": [{"role": "user", "content": "Risolvi questo problema in Python..."}]
+    "messages": [{"role": "user", "content": "Solve this puzzle in Python..."}]
   }'
 
-# Verifica salute e provider attivo
+# Health check
 curl "https://<DOMAIN>/health"
-# -> {"status": "ok", "provider": "copilot"}
+# -> {"status": "ok", "provider": "antigravity"}
 ```
-
