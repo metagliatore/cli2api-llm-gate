@@ -1,27 +1,45 @@
-# GitHub Copilot & Google Antigravity HTTP API
+# Multi-Provider AI HTTP Gateway
 
-A minimal, production-ready service that exposes **GitHub Copilot / GitHub Models** and **Google Antigravity (`agy`)** as a standard OpenAI-compatible HTTP API.
+A minimal, production-ready microservice that bridges **Google Antigravity (`agy`)** and **GitHub Copilot / GitHub Models** into a unified, **OpenAI-compatible HTTP API**.
+
+It allows external applications (Home Assistant, Open WebUI, Continue.dev, Dify, n8n, custom bots) to consume your host AI capabilities over secure HTTPS without paying for separate cloud API tokens.
+
+### ✨ Key Features
+- **Multi-Provider Routing**: Seamlessly route prompts to **Google Antigravity** (Gemini 3.8 Flash, Gemini 3.1 Pro, Claude Sonnet 4.6 Thinking, Claude Opus 4.6 Thinking) or **GitHub Copilot / Models** (GPT-4o, GPT-4o-mini, Llama 3.1, etc.).
+- **OpenAI Compatible (`/v1/chat/completions`)**: Direct drop-in replacement for OpenAI/Ollama clients with up to 180s timeout polling for deep reasoning models.
+- **Asynchronous Task Queue (Redis RQ)**: Handles heavy jobs, long prompts, and image processing (`/ask`, `/ask-image`, `/result/{job_id}`).
+- **Transparent Model Aliasing**: Client applications sending legacy model names (e.g. `gpt-4o-mini`) are automatically and gracefully mapped to the active provider default without errors.
+- **Zero-Credential Overhead**: Automatically mounts and reuses host CLI credentials (`~/.gemini` for Antigravity, `~/.config/gh` for Copilot).
+- **Production Hardened**: Caddy reverse proxy with automated TLS certificates (Let's Encrypt / ZeroSSL), multi-token Bearer authorization, and Redis rate limiting.
 
 ## Architecture
 
 ```
-Client
-  │
-  ▼
-FastAPI  :8000          ←  GET /ask?prompt=…&model=…&provider=…
-  │                        GET /result/{job_id}
-  │ enqueue job             POST /ask-image
-  ▼                        POST /v1/chat/completions
-Redis Queue (RQ)           GET /models
-  │
-  ▼
-RQ Worker
-  │
-  ├── [Provider: copilot] ─────► GitHub Models API (Free tier $0)
-  │                              or GitHub Copilot API (Subscription)
-  │
-  └── [Provider: antigravity] ──► Google Antigravity CLI (`agy`)
-                                 (Gemini 3.8 Flash, Claude 4.6 Thinking, etc.)
+                                  Client / External Apps
+                                            │
+                                            ▼
+                             Caddy Reverse Proxy (:80 / :443)
+                                 (Automated TLS Certificates)
+                                            │
+                                            ▼
+                              FastAPI (:8000 internal network)
+                                 - Multi-Bearer token auth
+                                 - Redis rate limiting
+                                 - Dynamic provider routing
+                                            │
+                                            ▼
+                                  Redis Queue 7 (RQ)
+                                            │
+                                            ▼
+                                        RQ Worker
+                                            │
+              ┌─────────────────────────────┴─────────────────────────────┐
+              │                                                           │
+              ▼                                                           ▼
+     [Provider: antigravity]                                     [Provider: copilot]
+   Google Antigravity CLI (`agy`)                              GitHub Models / Copilot API
+ (Gemini 3.8, Claude 4.6, GPT-OSS)                                (GPT-4o, Llama 3.1, etc.)
+ (Mounted ~/.gemini credentials)                                 (Mounted ~/.config/gh auth)
 ```
 
 Public traffic reaches only Caddy (80/443). FastAPI and Redis stay internal to the Docker network.
