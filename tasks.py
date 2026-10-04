@@ -16,11 +16,14 @@ import json
 import shutil
 import base64
 import tempfile
+import logging
 import subprocess
 try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
+
+logger = logging.getLogger(__name__)
 
 ANTIGRAVITY_MODELS = [
     "gemini-3.8-flash-high",
