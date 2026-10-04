@@ -56,7 +56,6 @@ def _find_agy_bin() -> str:
     candidates = [
         os.path.expanduser("~/.gemini/bin/agy"),
         "/root/.gemini/bin/agy",
-        "/root/.gemini/bin/agy",
     ]
     for c in candidates:
         if os.path.exists(c):
