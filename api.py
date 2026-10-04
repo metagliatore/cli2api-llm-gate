@@ -9,15 +9,21 @@ from redis import Redis
 from rq import Queue
 from rq.job import Job, NoSuchJobError
 
-from tasks import ask_copilot, ask_copilot_vision
+from tasks import (
+    dispatch_ask,
+    dispatch_ask_vision,
+    resolve_provider,
+    ANTIGRAVITY_MODELS,
+)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 API_KEY = os.getenv("API_KEY", "")
 API_KEYS = os.getenv("API_KEYS", "")
 RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "60"))
 PUBLIC_HEALTH = os.getenv("PUBLIC_HEALTH", "true").lower() == "true"
+DEFAULT_PROVIDER = os.getenv("PROVIDER", "copilot").lower()
 
-app = FastAPI(title="GitHub Copilot API", version="2.0.0")
+app = FastAPI(title="Multi-Provider AI HTTP API (Copilot & Antigravity)", version="2.1.0")
 
 redis_conn = Redis.from_url(REDIS_URL)
 queue = Queue("copilot", connection=redis_conn)
@@ -83,21 +89,37 @@ def auth_and_rate_limit(
 @app.get("/ask")
 def ask(
     _: None = Depends(auth_and_rate_limit),
-    prompt: str = Query(..., description="Natural-language prompt for Copilot"),
+    prompt: str = Query(..., description="Natural-language prompt"),
     model: str | None = Query(
         None,
         description=(
-            "Model to use. Examples: gpt-4o-mini (default, free), gpt-4o, "
-            "meta-llama-3.1-8b-instruct, claude-sonnet-4-5 (Copilot subscription)"
+            "Model to use. Examples: gpt-4o-mini, gpt-4o (Copilot); "
+            "gemini-3.8-flash-high, claude-sonnet-4-6, claude-opus-4-6-thinking (Antigravity)"
         ),
     ),
+    provider: str | None = Query(
+        None,
+        description="Override provider: 'copilot' or 'antigravity'. Defaults to server PROVIDER env.",
+    ),
 ):
-    """Enqueue a Copilot job and return the job_id immediately."""
+    """Enqueue an AI prompt job and return the job_id immediately."""
     if not prompt.strip():
         raise HTTPException(status_code=400, detail="prompt must not be empty")
 
-    job = queue.enqueue(ask_copilot, prompt, model, job_timeout=120)
-    return {"job_id": job.id, "status": job.get_status(), "model_requested": model}
+    target_provider = resolve_provider(model=model, provider=provider)
+    job = queue.enqueue(dispatch_ask, prompt, model, target_provider, job_timeout=180)
+    status_str = job.get_status()
+    if hasattr(status_str, "value"):
+        status_str = status_str.value
+    else:
+        status_str = str(status_str)
+
+    return {
+        "job_id": job.id,
+        "status": status_str,
+        "model_requested": model,
+        "provider": target_provider,
+    }
 
 
 @app.get("/result/{job_id}")
@@ -109,11 +131,12 @@ def result(job_id: str, _: None = Depends(auth_and_rate_limit)):
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
 
     status = job.get_status()
-    response = {"job_id": job_id, "status": str(status)}
+    status_val = status.value if hasattr(status, "value") else str(status)
+    response = {"job_id": job_id, "status": status_val}
 
-    if status.value == "finished":
+    if status_val == "finished":
         response["result"] = job.result
-    elif status.value == "failed":
+    elif status_val == "failed":
         response["error"] = str(job.exc_info)
 
     return response
@@ -121,8 +144,10 @@ def result(job_id: str, _: None = Depends(auth_and_rate_limit)):
 
 @app.get("/models")
 def models(_: None = Depends(auth_and_rate_limit)):
-    """Return the list of suggested available models."""
+    """Return the list of suggested available models across providers."""
     return {
+        "active_default_provider": DEFAULT_PROVIDER,
+        "antigravity_models": ANTIGRAVITY_MODELS,
         "github_models_free_tier": [
             "gpt-4o-mini",
             "gpt-4o",
@@ -137,7 +162,10 @@ def models(_: None = Depends(auth_and_rate_limit)):
             "o1-mini",
             "claude-sonnet-4-5",
         ],
-        "note": "Set COPILOT_BASE_URL and GITHUB_TOKEN env vars to choose the backend.",
+        "note": (
+            "Set PROVIDER=copilot or PROVIDER=antigravity in .env, or specify "
+            "?provider= per request. Antigravity models are also automatically detected from model names."
+        ),
     }
 
 
@@ -151,7 +179,7 @@ def health(
         provided_key = _extract_api_key(authorization, x_api_key)
         if not valid_keys or not provided_key or provided_key not in valid_keys:
             raise HTTPException(status_code=401, detail="Invalid API key")
-    return {"status": "ok"}
+    return {"status": "ok", "provider": DEFAULT_PROVIDER}
 
 
 # ── Vision endpoint ───────────────────────────────────────────────────────────
@@ -164,18 +192,13 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
 async def ask_image(
     _: None = Depends(auth_and_rate_limit),
     prompt: str = Form(..., description="Question or instruction about the image"),
-    model: str = Form("gpt-4o", description="Vision model to use (gpt-4o or gpt-4o-mini)"),
+    model: str | None = Form(None, description="Vision model to use (e.g. gpt-4o or gemini-3.8-flash-high)"),
+    provider: str | None = Form(None, description="Override provider: 'copilot' or 'antigravity'"),
     file: UploadFile = File(..., description="Image file (JPEG, PNG, WEBP, GIF)"),
 ):
     """
     Upload an image and ask a question about it.
     Returns a job_id — poll /result/{job_id} for the answer.
-
-    Example with curl:
-        curl -X POST http://localhost:8000/ask-image \\
-          -F 'prompt=Describe what you see in this chart' \\
-          -F 'model=gpt-4o' \\
-          -F 'file=@/path/to/image.png'
     """
     mime_type = file.content_type or "image/jpeg"
     if mime_type not in SUPPORTED_MIME:
@@ -189,29 +212,44 @@ async def ask_image(
         raise HTTPException(status_code=413, detail="Image exceeds 20 MB limit")
 
     image_b64 = base64.b64encode(raw).decode()
+    target_provider = resolve_provider(model=model, provider=provider)
 
     job = queue.enqueue(
-        ask_copilot_vision,
+        dispatch_ask_vision,
         prompt,
         image_b64,
         mime_type,
         model,
-        job_timeout=180,
+        target_provider,
+        job_timeout=240,
     )
-    return {"job_id": job.id, "status": job.get_status(), "model_requested": model}
+    status_str = job.get_status()
+    if hasattr(status_str, "value"):
+        status_str = status_str.value
+    else:
+        status_str = str(status_str)
+
+    return {
+        "job_id": job.id,
+        "status": status_str,
+        "model_requested": model,
+        "provider": target_provider,
+    }
 
 
 # ── OpenAI-compatible endpoint ────────────────────────────────────────────────
-# Drop-in replacement for Ollama / OpenAI clients (LangChain, Continue.dev, etc.)
+# Drop-in replacement for Ollama / OpenAI clients (LangChain, Continue.dev, Open WebUI, etc.)
 
 class ChatMessage(BaseModel):
     role: str
     content: str
 
+
 class ChatRequest(BaseModel):
     model: Optional[str] = None
     messages: list[ChatMessage]
     stream: bool = False
+
 
 @app.post("/v1/chat/completions")
 def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_rate_limit)):
@@ -222,8 +260,9 @@ def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_r
     """
     # Flatten messages into a single prompt string
     prompt = "\n".join(f"{m.role.upper()}: {m.content}" for m in body.messages)
+    target_provider = resolve_provider(model=body.model)
 
-    job = queue.enqueue(ask_copilot, prompt, body.model, job_timeout=120)
+    job = queue.enqueue(dispatch_ask, prompt, body.model, target_provider, job_timeout=180)
 
     # Poll until finished or timeout
     for _ in range(120):
@@ -236,10 +275,15 @@ def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_r
         raise HTTPException(status_code=500, detail=str(job.exc_info))
 
     result = job.result or {}
+    if "error" in result and result.get("error"):
+        raise HTTPException(status_code=502, detail=result["error"])
+
+    model_used = result.get("model", body.model or ("gemini-3.8-flash-high" if target_provider == "antigravity" else "gpt-4o-mini"))
     return {
         "id": f"chatcmpl-{job.id}",
         "object": "chat.completion",
-        "model": result.get("model", body.model or "gpt-4o-mini"),
+        "model": model_used,
+        "provider": target_provider,
         "choices": [{
             "index": 0,
             "message": {

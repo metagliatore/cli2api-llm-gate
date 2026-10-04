@@ -1,7 +1,8 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# GitHub Copilot HTTP API
-# Auth: mounts ~/.config/gh from the host; the entrypoint calls `gh auth token`
-# to inject GITHUB_TOKEN automatically – no manual PAT management needed.
+# AI HTTP API (GitHub Copilot & Google Antigravity)
+# Auth:
+#   - Copilot: mounts ~/.config/gh from the host; entrypoint calls `gh auth token`
+#   - Antigravity: mounts ~/.gemini from the host; uses `agy` CLI binary
 # ──────────────────────────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
@@ -16,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
+
+# Add ~/.gemini/bin to PATH for agy CLI binary
+ENV PATH="/root/.gemini/bin:${PATH}"
 
 # ----- Python dependencies -----
 WORKDIR /app
