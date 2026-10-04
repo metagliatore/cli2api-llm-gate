@@ -24,6 +24,9 @@ Il progetto è un microservizio containerizzato e pronto per la produzione che e
   - Reverse proxy Caddy con HTTPS/TLS automatico (porte `80`/`443`).
   - Porte interne (`8000` di FastAPI e `6379` di Redis) isolate nella rete Docker `backend` (nessun conflitto con Portainer su `:8000`).
   - Rate limiting per singolo token API su bucket Redis al minuto (`RATE_LIMIT_RPM`).
+- **Retrocompatibilità trasparente al 100% per i client esistenti**:
+  - Se un applicativo legacy invia modelli Copilot/OpenAI (es. `gpt-4o-mini`, `gpt-4o`) mentre il provider attivo è `antigravity`, il worker mappa automaticamente la richiesta sul modello Antigravity di default (`gemini-3.8-flash-high`) senza rompere i client esistenti.
+  - L'endpoint sincrono `/v1/chat/completions` gestisce il polling fino a 180s per i modelli Antigravity con reasoning elevato.
 
 ---
 
