@@ -522,6 +522,10 @@ def chat_complete_copilot(
         response = client.chat.completions.create(**call_kwargs)
         res_dict = response.model_dump()
         res_dict["provider"] = "copilot"
+        if not res_dict.get("object"):
+            res_dict["object"] = "chat.completion"
+        if not res_dict.get("created"):
+            res_dict["created"] = int(time.time())
         return res_dict
     except Exception as e:
         logger.exception("Error in Copilot chat completion: %s", e)
@@ -586,7 +590,12 @@ def chat_stream_copilot(
     try:
         stream = client.chat.completions.create(**call_kwargs)
         for chunk in stream:
-            yield f"data: {chunk.model_dump_json()}\n\n"
+            chunk_dict = chunk.model_dump()
+            if not chunk_dict.get("object"):
+                chunk_dict["object"] = "chat.completion.chunk"
+            if not chunk_dict.get("created"):
+                chunk_dict["created"] = int(time.time())
+            yield f"data: {json.dumps(chunk_dict)}\n\n"
         yield "data: [DONE]\n\n"
     except Exception as e:
         logger.exception("Error in Copilot chat streaming: %s", e)
