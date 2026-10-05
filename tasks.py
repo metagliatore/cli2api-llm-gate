@@ -180,12 +180,32 @@ def is_antigravity_model(model: str | None) -> bool:
     )
 
 
+def is_copilot_model(model: str | None) -> bool:
+    """Check if model name matches Copilot / GitHub model patterns."""
+    if not model:
+        return False
+    m = model.lower()
+    return (
+        m.startswith("gpt-")
+        or m.startswith("o1-")
+        or m.startswith("o3-")
+        or m.startswith("claude-sonnet-4-5")
+        or m.startswith("meta-llama")
+        or m.startswith("mistral")
+        or m.startswith("phi-")
+        or m in COPILOT_MODELS
+    )
+
+
 def resolve_provider(model: str | None = None, provider: str | None = None) -> str:
     """Determine the provider ('copilot' or 'antigravity')."""
     if provider:
         return provider.lower()
-    if model and is_antigravity_model(model):
-        return "antigravity"
+    if model:
+        if is_antigravity_model(model):
+            return "antigravity"
+        if is_copilot_model(model):
+            return "copilot"
     return os.getenv("PROVIDER", "copilot").lower()
 
 
@@ -376,7 +396,9 @@ def prepare_messages_for_openai(messages: List[Any]) -> List[Dict[str, Any]]:
 def _get_client() -> tuple:
     """Return (client, default_model). Reads env vars and tokens dynamically."""
     github_token = _get_github_token()
-    base_url = os.getenv("COPILOT_BASE_URL", "https://models.inference.ai.azure.com")
+    base_url = os.getenv("COPILOT_BASE_URL", "https://api.githubcopilot.com")
+    if "models.inference.ai.azure.com" in base_url:
+        base_url = "https://api.githubcopilot.com"
     default_model = os.getenv("COPILOT_MODEL", "gpt-4o-mini")
     if not github_token:
         return None, default_model

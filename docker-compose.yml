@@ -21,9 +21,8 @@ x-common-env: &common-env
 
   # ── Copilot options ──
   # API backend:
-  #   https://models.inference.ai.azure.com  ← GitHub Models FREE tier (default)
-  #   https://api.githubcopilot.com          ← Copilot API (subscription required)
-  COPILOT_BASE_URL: ${COPILOT_BASE_URL:-https://models.inference.ai.azure.com}
+  #   https://api.githubcopilot.com          ← Copilot API (default)
+  COPILOT_BASE_URL: ${COPILOT_BASE_URL:-https://api.githubcopilot.com}
   # Default model (can be overridden per request via ?model= query param)
   COPILOT_MODEL: ${COPILOT_MODEL:-gpt-4o-mini}
 
