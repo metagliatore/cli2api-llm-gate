@@ -929,6 +929,7 @@ def chat_stream_antigravity(
     detected_tool_call = False
     flushed_buffer = False
 
+    error_msg = None
     for line in proc.stdout:
         line = line.strip()
         if not line:
@@ -999,6 +1000,7 @@ def chat_stream_antigravity(
 
         elif evt == "result":
             res = event_data.get("result", {})
+            error_msg = res.get("error")
             raw_usage = res.get("usage", {})
             if raw_usage:
                 final_usage = {
@@ -1008,6 +1010,24 @@ def chat_stream_antigravity(
                 }
 
     proc.wait()
+
+    # If agy reported an error and no output was produced, yield error chunk
+    if (proc.returncode != 0 or error_msg) and not full_text:
+        err_detail = error_msg or f"Antigravity process exited with code {proc.returncode}"
+        err_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": chosen_model,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": f"\n[Antigravity Error: {err_detail}]"},
+                "finish_reason": "stop",
+            }],
+        }
+        yield f"data: {json.dumps(err_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
     # Handle completion when tools were requested
     if is_tool_mode and not flushed_buffer:
