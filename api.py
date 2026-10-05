@@ -2,9 +2,10 @@ import os
 import base64
 import time
 import hashlib
-from typing import Optional
+from typing import Optional, Union, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query, Body, UploadFile, File, Form, Depends, Header, Request
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict
 from redis import Redis
 from rq import Queue
 from rq.job import Job, NoSuchJobError
@@ -12,8 +13,12 @@ from rq.job import Job, NoSuchJobError
 from tasks import (
     dispatch_ask,
     dispatch_ask_vision,
+    dispatch_chat_completion,
+    dispatch_chat_stream,
     resolve_provider,
     ANTIGRAVITY_MODELS,
+    COPILOT_MODELS,
+    get_available_models,
 )
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
@@ -23,7 +28,11 @@ RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "60"))
 PUBLIC_HEALTH = os.getenv("PUBLIC_HEALTH", "true").lower() == "true"
 DEFAULT_PROVIDER = os.getenv("PROVIDER", "copilot").lower()
 
-app = FastAPI(title="Multi-Provider AI HTTP API (Copilot & Antigravity)", version="2.1.0")
+app = FastAPI(
+    title="cli2api-ai – Multi-Provider AI HTTP API (Copilot & Antigravity)",
+    version="2.2.0",
+    description="OpenAI-compatible and asynchronous API for GitHub Copilot / Models and Google Antigravity.",
+)
 
 redis_conn = Redis.from_url(REDIS_URL)
 queue = Queue("copilot", connection=redis_conn)
@@ -76,15 +85,22 @@ def auth_and_rate_limit(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     key_fingerprint = hashlib.sha256(provided_key.encode()).hexdigest()[:16]
-    limiter_key = f"ratelimit:{key_fingerprint}:{int(time.time() // 60)}"
-    current = redis_conn.incr(limiter_key)
-    if current == 1:
-        redis_conn.expire(limiter_key, 61)
-    if current > RATE_LIMIT_RPM:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    try:
+        current = redis_conn.incr(limiter_key)
+        if current == 1:
+            redis_conn.expire(limiter_key, 61)
+        if current > RATE_LIMIT_RPM:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    except HTTPException:
+        raise
+    except Exception:
+        # Fail-open if Redis is temporarily unavailable
+        pass
 
     request.state.api_key_fingerprint = key_fingerprint
 
+
+# ── Asynchronous Queue Endpoints ─────────────────────────────────────────────
 
 @app.get("/ask")
 def ask(
@@ -142,9 +158,38 @@ def result(job_id: str, _: None = Depends(auth_and_rate_limit)):
     return response
 
 
+# ── Models & Health ──────────────────────────────────────────────────────────
+
+@app.get("/v1/models")
+def list_v1_models(_: None = Depends(auth_and_rate_limit)):
+    """List available models in OpenAI-compatible schema."""
+    return {
+        "object": "list",
+        "data": get_available_models(),
+    }
+
+
+@app.get("/v1/models/{model_id}")
+def get_v1_model(model_id: str, _: None = Depends(auth_and_rate_limit)):
+    """Retrieve model info in OpenAI-compatible schema."""
+    all_models = {m["id"]: m for m in get_available_models()}
+    if model_id in all_models:
+        return all_models[model_id]
+
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": "cli2api-ai",
+        "permission": [],
+        "root": model_id,
+        "parent": None,
+    }
+
+
 @app.get("/models")
 def models(_: None = Depends(auth_and_rate_limit)):
-    """Return the list of suggested available models across providers."""
+    """Return the list of suggested available models across providers (legacy endpoint)."""
     return {
         "active_default_provider": DEFAULT_PROVIDER,
         "antigravity_models": ANTIGRAVITY_MODELS,
@@ -182,7 +227,7 @@ def health(
     return {"status": "ok", "provider": DEFAULT_PROVIDER}
 
 
-# ── Vision endpoint ───────────────────────────────────────────────────────────
+# ── Vision Endpoint ──────────────────────────────────────────────────────────
 
 SUPPORTED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -237,66 +282,82 @@ async def ask_image(
     }
 
 
-# ── OpenAI-compatible endpoint ────────────────────────────────────────────────
-# Drop-in replacement for Ollama / OpenAI clients (LangChain, Continue.dev, Open WebUI, etc.)
+# ── OpenAI-Compatible Chat Completions Endpoint ───────────────────────────────
+# Seamless integration with Pi Coding Agent, LangChain, Aider, Open WebUI, AutoGen, etc.
 
 class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
     role: str
-    content: str
+    content: Optional[Union[str, List[Union[Dict[str, Any], Any]]]] = None
+    name: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
     model: Optional[str] = None
-    messages: list[ChatMessage]
-    stream: bool = False
+    messages: List[ChatMessage]
+    stream: Optional[bool] = False
+    stream_options: Optional[Dict[str, Any]] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
+    stop: Optional[Union[str, List[str]]] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    response_format: Optional[Dict[str, Any]] = None
+    provider: Optional[str] = None
 
 
 @app.post("/v1/chat/completions")
 def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_rate_limit)):
     """
-    OpenAI-compatible synchronous chat endpoint.
-    Waits up to 60 s for the worker to return a result.
-    Compatible with LangChain, LlamaIndex, Continue.dev, Open WebUI, etc.
+    OpenAI-compatible chat completions endpoint.
+    Supports real-time streaming (SSE text/event-stream), tool/function calling,
+    multi-turn conversations, and both Antigravity and Copilot providers.
     """
-    # Flatten messages into a single prompt string
-    prompt = "\n".join(f"{m.role.upper()}: {m.content}" for m in body.messages)
-    target_provider = resolve_provider(model=body.model)
+    if not body.messages:
+        raise HTTPException(status_code=400, detail="messages list must not be empty")
 
-    job = queue.enqueue(dispatch_ask, prompt, body.model, target_provider, job_timeout=180)
+    effective_max_tokens = body.max_tokens or body.max_completion_tokens
 
-    # Poll until finished or timeout (up to 180s)
-    for _ in range(360):
-        job.refresh()
-        if job.is_finished or job.is_failed:
-            break
-        time.sleep(0.5)
-
-    if job.is_failed:
-        raise HTTPException(status_code=500, detail=str(job.exc_info))
-
-    if not job.is_finished:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Job '{job.id}' timed out after 180s. You can poll /result/{job.id} for the result once ready.",
+    if body.stream:
+        return StreamingResponse(
+            dispatch_chat_stream(
+                messages=body.messages,
+                model=body.model,
+                provider=body.provider,
+                tools=body.tools,
+                tool_choice=body.tool_choice,
+                temperature=body.temperature,
+                max_tokens=effective_max_tokens,
+                stop=body.stop,
+                stream_options=body.stream_options,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
-    result = job.result or {}
+    result = dispatch_chat_completion(
+        messages=body.messages,
+        model=body.model,
+        provider=body.provider,
+        tools=body.tools,
+        tool_choice=body.tool_choice,
+        temperature=body.temperature,
+        max_tokens=effective_max_tokens,
+        stop=body.stop,
+    )
+
     if "error" in result and result.get("error"):
         raise HTTPException(status_code=502, detail=result["error"])
 
-    model_used = result.get("model", body.model or ("gemini-3.8-flash-high" if target_provider == "antigravity" else "gpt-4o-mini"))
-    return {
-        "id": f"chatcmpl-{job.id}",
-        "object": "chat.completion",
-        "model": model_used,
-        "provider": target_provider,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": result.get("content", ""),
-            },
-            "finish_reason": "stop",
-        }],
-        "usage": result.get("usage", {}),
-    }
+    return result

@@ -151,10 +151,17 @@ curl -X POST "https://$DOMAIN/ask-image" \
 
 ---
 
-### `POST /v1/chat/completions` (OpenAI-Compatible)
+### `POST /v1/chat/completions` (OpenAI-Compatible & Agent Harness Support)
 
-Drop-in replacement for OpenAI / Ollama clients (Open WebUI, Continue.dev, LangChain, etc.).
+Drop-in replacement for OpenAI / Ollama clients and **coding agent harnesses** (**Pi Coding Agent**, **Aider**, **Continue.dev**, **Open WebUI**, **LangChain**, **AutoGen**, etc.).
 
+Supports:
+- **Real-Time Streaming** (`stream: true` via Server-Sent Events `text/event-stream`).
+- **Tool / Function Calling** (`tools`, `tool_choice`, `tool_calls`).
+- **Multi-turn Context** (`system`, `user`, `assistant`, `tool` roles).
+- **Both Providers**: Antigravity (`agy`) and GitHub Copilot / Models.
+
+#### 1. Standard Chat Completion
 ```bash
 curl https://$DOMAIN/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
@@ -165,11 +172,76 @@ curl https://$DOMAIN/v1/chat/completions \
   }'
 ```
 
+#### 2. Real-Time Streaming (`stream: true`)
+```bash
+curl -N https://$DOMAIN/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.8-flash-high",
+    "messages": [{"role": "user", "content": "Write a python fibonacci generator"}],
+    "stream": true
+  }'
+```
+
+#### 3. Tool / Function Calling
+```bash
+curl https://$DOMAIN/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.8-flash-high",
+    "messages": [{"role": "user", "content": "What is the weather in Rome?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get current weather for a city",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }]
+  }'
+```
+
+#### 4. Official OpenAI Python SDK Integration
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://api.your-domain.com/v1",
+    api_key="your_secret_api_key",
+)
+
+# Streaming
+stream = client.chat.completions.create(
+    model="gemini-3.8-flash-high",
+    messages=[{"role": "user", "content": "Explain async/await in Python"}],
+    stream=True,
+)
+for chunk in stream:
+    if chunk.choices and chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
+```
+
+---
+
+### `GET /v1/models` & `GET /v1/models/{model_id}`
+
+Returns the list of available models in standard OpenAI format for dynamic model discovery in agent harnesses:
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" "https://$DOMAIN/v1/models"
+```
+
 ---
 
 ### `GET /models`
 
-Returns the list of available models split by provider:
+Returns the list of available models split by provider (legacy endpoint):
 
 ```bash
 curl -H "Authorization: Bearer $API_KEY" "https://$DOMAIN/models"

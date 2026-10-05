@@ -1,5 +1,5 @@
 """
-tasks.py – RQ task that calls the GitHub Copilot / GitHub Models API or Google Antigravity (agy).
+tasks.py – Tasks and completion handlers for GitHub Copilot / Models and Google Antigravity (agy).
 
 Backends:
 ---------
@@ -12,12 +12,17 @@ Backends:
 """
 
 import os
+import re
 import json
+import uuid
+import time
 import shutil
 import base64
 import tempfile
 import logging
 import subprocess
+from typing import Optional, Union, List, Dict, Any, Generator
+
 try:
     from openai import OpenAI
 except ImportError:
@@ -42,8 +47,55 @@ ANTIGRAVITY_MODELS = [
     "gpt-oss-120b-medium",
 ]
 
+COPILOT_MODELS = [
+    "gpt-4o-mini",
+    "gpt-4o",
+    "o1-mini",
+    "o1-preview",
+    "claude-sonnet-4-5",
+    "meta-llama-3.1-8b-instruct",
+    "meta-llama-3.1-70b-instruct",
+    "mistral-small",
+    "phi-4",
+]
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def get_available_models() -> List[Dict[str, Any]]:
+    """Return all models in OpenAI /v1/models list format."""
+    now = int(time.time())
+    seen = set()
+    model_list = []
+
+    for m in ANTIGRAVITY_MODELS:
+        if m not in seen:
+            seen.add(m)
+            model_list.append({
+                "id": m,
+                "object": "model",
+                "created": now,
+                "owned_by": "antigravity",
+                "permission": [],
+                "root": m,
+                "parent": None,
+            })
+
+    for m in COPILOT_MODELS:
+        if m not in seen:
+            seen.add(m)
+            model_list.append({
+                "id": m,
+                "object": "model",
+                "created": now,
+                "owned_by": "copilot",
+                "permission": [],
+                "root": m,
+                "parent": None,
+            })
+
+    return model_list
+
 
 def _find_agy_bin() -> str:
     """Locate the agy CLI binary path."""
@@ -61,6 +113,57 @@ def _find_agy_bin() -> str:
         if os.path.exists(c):
             return c
     return "agy"
+
+
+def _get_github_token() -> str:
+    """Extract GitHub token from env, mounted gh config, or gh CLI."""
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        return token
+
+    # Check hosts.yml in mounted or host config paths
+    candidate_paths = [
+        os.path.expanduser("~/.config/gh/hosts.yml"),
+        "/gh-config-ro/hosts.yml",
+        "/tmp/gh-config/hosts.yml",
+    ]
+    for path in candidate_paths:
+        if os.path.exists(path):
+            try:
+                try:
+                    import yaml
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = yaml.safe_load(f)
+                    if isinstance(data, dict):
+                        for host, vals in data.items():
+                            if isinstance(vals, dict) and "oauth_token" in vals:
+                                token = vals["oauth_token"]
+                                os.environ["GITHUB_TOKEN"] = token
+                                return token
+                except ImportError:
+                    pass
+
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if "oauth_token:" in line:
+                            token = line.split("oauth_token:", 1)[1].strip().strip('"').strip("'")
+                            if token:
+                                os.environ["GITHUB_TOKEN"] = token
+                                return token
+            except Exception as e:
+                logger.warning("Error reading %s: %s", path, e)
+
+    # Fallback: gh auth token command
+    try:
+        proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=5)
+        if proc.returncode == 0 and proc.stdout.strip():
+            token = proc.stdout.strip()
+            os.environ["GITHUB_TOKEN"] = token
+            return token
+    except Exception:
+        pass
+
+    return ""
 
 
 def is_antigravity_model(model: str | None) -> bool:
@@ -86,11 +189,193 @@ def resolve_provider(model: str | None = None, provider: str | None = None) -> s
     return os.getenv("PROVIDER", "copilot").lower()
 
 
+def extract_text_from_content(content: Any) -> str:
+    """Extract plain text string from string or multimodal content structure."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+                elif item.get("type") == "image_url":
+                    url = item.get("image_url", {}).get("url", "")
+                    if url.startswith("data:"):
+                        parts.append("[Image attached]")
+                    else:
+                        parts.append(f"[Image URL: {url}]")
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts)
+    return str(content)
+
+
+def format_messages_for_antigravity(
+    messages: List[Any],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+) -> str:
+    """
+    Format chat messages and optional tool specifications into a prompt for agy.
+    """
+    system_prompts: List[str] = []
+    conversation_turns: List[str] = []
+
+    for msg in messages:
+        if isinstance(msg, dict):
+            role = msg.get("role", "user")
+            content = msg.get("content")
+            tool_calls = msg.get("tool_calls")
+            tool_call_id = msg.get("tool_call_id")
+            name = msg.get("name")
+        else:
+            role = getattr(msg, "role", "user")
+            content = getattr(msg, "content", None)
+            tool_calls = getattr(msg, "tool_calls", None)
+            tool_call_id = getattr(msg, "tool_call_id", None)
+            name = getattr(msg, "name", None)
+
+        text = extract_text_from_content(content)
+
+        if role in ("system", "developer"):
+            if text:
+                system_prompts.append(text)
+        elif role == "user":
+            conversation_turns.append(f"User: {text}")
+        elif role == "assistant":
+            parts = []
+            if text:
+                parts.append(text)
+            if tool_calls:
+                parts.append(f"```json\n{{\"tool_calls\": {json.dumps(tool_calls)}}}\n```")
+            conversation_turns.append(f"Assistant: {' '.join(parts) if parts else ''}")
+        elif role in ("tool", "function"):
+            identifier = name or tool_call_id or "tool"
+            conversation_turns.append(f"Tool Result ({identifier}): {text}")
+        else:
+            conversation_turns.append(f"{role.capitalize()}: {text}")
+
+    prompt_sections: List[str] = []
+    if system_prompts:
+        prompt_sections.append("[System Instructions]\n" + "\n\n".join(system_prompts))
+
+    if tools and tool_choice != "none":
+        tool_instruction = (
+            "[Available Tools]\n"
+            "You have access to the following tools:\n"
+            f"{json.dumps(tools, indent=2)}\n\n"
+            "If you decide to invoke any tool, respond ONLY with a ```json markdown block containing:\n"
+            "```json\n"
+            "{\n"
+            '  "tool_calls": [\n'
+            "    {\n"
+            '      "name": "<tool_name>",\n'
+            '      "arguments": { <arguments_dict> }\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "```\n"
+            "Do NOT include conversational text before or after the JSON block when calling tools.\n"
+            "If no tool call is needed, provide your regular text answer directly without wrapping in tool_calls JSON."
+        )
+        if isinstance(tool_choice, dict) and "function" in tool_choice:
+            func_name = tool_choice["function"].get("name")
+            if func_name:
+                tool_instruction += f"\nYou MUST invoke the function '{func_name}'."
+        elif tool_choice == "required":
+            tool_instruction += "\nYou MUST invoke at least one tool."
+
+        prompt_sections.append(tool_instruction)
+
+    if conversation_turns:
+        prompt_sections.append("[Conversation]\n" + "\n\n".join(conversation_turns))
+
+    prompt_sections.append("Assistant:")
+    return "\n\n".join(prompt_sections)
+
+
+def parse_tool_calls_from_text(text: str) -> tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
+    """
+    Search for a tool_calls block in the model output.
+    Returns (cleaned_content, parsed_tool_calls_list).
+    """
+    if not text:
+        return None, None
+
+    # Try 1: Search for ```json ... ``` code blocks
+    code_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    for block in code_blocks:
+        try:
+            data = json.loads(block.strip())
+            if isinstance(data, dict) and "tool_calls" in data and isinstance(data["tool_calls"], list):
+                tool_calls = []
+                for tc in data["tool_calls"]:
+                    name = tc.get("name")
+                    args = tc.get("arguments", {})
+                    args_str = json.dumps(args) if isinstance(args, (dict, list)) else str(args)
+                    tool_calls.append({
+                        "id": f"call_{uuid.uuid4().hex[:12]}",
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": args_str,
+                        },
+                    })
+                # Remove the parsed tool call block from content
+                cleaned = re.sub(r"```(?:json)?\s*" + re.escape(block.strip()) + r"\s*```", "", text).strip()
+                return (cleaned if cleaned else None), tool_calls
+        except json.JSONDecodeError:
+            continue
+
+    # Try 2: Direct raw JSON without markdown fences
+    try:
+        data = json.loads(text.strip())
+        if isinstance(data, dict) and "tool_calls" in data and isinstance(data["tool_calls"], list):
+            tool_calls = []
+            for tc in data["tool_calls"]:
+                name = tc.get("name")
+                args = tc.get("arguments", {})
+                args_str = json.dumps(args) if isinstance(args, (dict, list)) else str(args)
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex[:12]}",
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": args_str,
+                    },
+                })
+            return None, tool_calls
+    except json.JSONDecodeError:
+        pass
+
+    return text.strip(), None
+
+
+def prepare_messages_for_openai(messages: List[Any]) -> List[Dict[str, Any]]:
+    """Clean and prepare message dicts for the official OpenAI client."""
+    prepared = []
+    for msg in messages:
+        if hasattr(msg, "model_dump"):
+            d = msg.model_dump(exclude_none=True)
+        elif isinstance(msg, dict):
+            d = {k: v for k, v in msg.items() if v is not None}
+        else:
+            d = {
+                "role": getattr(msg, "role", "user"),
+                "content": getattr(msg, "content", ""),
+            }
+        prepared.append(d)
+    return prepared
+
+
 # ── Copilot / GitHub Models ───────────────────────────────────────────────────
 
 def _get_client() -> tuple:
-    """Return (client, default_model). Reads env vars at call time."""
-    github_token = os.getenv("GITHUB_TOKEN", "")
+    """Return (client, default_model). Reads env vars and tokens dynamically."""
+    github_token = _get_github_token()
     base_url = os.getenv("COPILOT_BASE_URL", "https://models.inference.ai.azure.com")
     default_model = os.getenv("COPILOT_MODEL", "gpt-4o-mini")
     if not github_token:
@@ -98,9 +383,14 @@ def _get_client() -> tuple:
     return OpenAI(base_url=base_url, api_key=github_token), default_model
 
 
-def _token_check() -> dict | None:
-    if not os.getenv("GITHUB_TOKEN", ""):
-        return {"error": "GITHUB_TOKEN environment variable is not set.", "content": None, "model": None}
+def _token_check() -> Optional[Dict[str, Any]]:
+    token = _get_github_token()
+    if not token:
+        return {
+            "error": "GITHUB_TOKEN environment variable is not set and gh auth was not found.",
+            "content": None,
+            "model": None,
+        }
     return None
 
 
@@ -172,7 +462,140 @@ def ask_copilot_vision(
     }
 
 
+def chat_complete_copilot(
+    messages: List[Any],
+    model: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Execute chat completion using GitHub Copilot / Models API."""
+    err = _token_check()
+    if err:
+        return err
+
+    client, default_model = _get_client()
+    chosen_model = model or default_model
+    prepared_messages = prepare_messages_for_openai(messages)
+
+    call_kwargs: Dict[str, Any] = {
+        "model": chosen_model,
+        "messages": prepared_messages,
+    }
+    if tools:
+        call_kwargs["tools"] = tools
+    if tool_choice:
+        call_kwargs["tool_choice"] = tool_choice
+    if temperature is not None:
+        call_kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        call_kwargs["max_tokens"] = max_tokens
+    if stop is not None:
+        call_kwargs["stop"] = stop
+
+    try:
+        response = client.chat.completions.create(**call_kwargs)
+        res_dict = response.model_dump()
+        res_dict["provider"] = "copilot"
+        return res_dict
+    except Exception as e:
+        logger.exception("Error in Copilot chat completion: %s", e)
+        return {
+            "error": f"Copilot error: {str(e)}",
+            "model": chosen_model,
+            "provider": "copilot",
+        }
+
+
+def chat_stream_copilot(
+    messages: List[Any],
+    model: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
+    stream_options: Optional[Dict[str, Any]] = None,
+    **kwargs,
+) -> Generator[str, None, None]:
+    """Stream chat completions from GitHub Copilot / Models API as Server-Sent Events."""
+    err = _token_check()
+    if err:
+        err_chunk = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model or "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": f"\n[Error: {err.get('error')}]"},
+                "finish_reason": "stop",
+            }],
+        }
+        yield f"data: {json.dumps(err_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    client, default_model = _get_client()
+    chosen_model = model or default_model
+    prepared_messages = prepare_messages_for_openai(messages)
+
+    call_kwargs: Dict[str, Any] = {
+        "model": chosen_model,
+        "messages": prepared_messages,
+        "stream": True,
+    }
+    if tools:
+        call_kwargs["tools"] = tools
+    if tool_choice:
+        call_kwargs["tool_choice"] = tool_choice
+    if temperature is not None:
+        call_kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        call_kwargs["max_tokens"] = max_tokens
+    if stop is not None:
+        call_kwargs["stop"] = stop
+    if stream_options:
+        call_kwargs["stream_options"] = stream_options
+
+    try:
+        stream = client.chat.completions.create(**call_kwargs)
+        for chunk in stream:
+            yield f"data: {chunk.model_dump_json()}\n\n"
+        yield "data: [DONE]\n\n"
+    except Exception as e:
+        logger.exception("Error in Copilot chat streaming: %s", e)
+        err_chunk = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": chosen_model,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": f"\n[Copilot error: {str(e)}]"},
+                "finish_reason": "stop",
+            }],
+        }
+        yield f"data: {json.dumps(err_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+
 # ── Antigravity (agy) ─────────────────────────────────────────────────────────
+
+def _get_subprocess_env() -> dict:
+    """Return environment dict ensuring HOME, PATH and Antigravity dirs are set."""
+    env = os.environ.copy()
+    if "HOME" not in env or not env["HOME"]:
+        env["HOME"] = os.path.expanduser("~") or "/root"
+    gemini_bin = os.path.expanduser("~/.gemini/bin")
+    current_path = env.get("PATH", "")
+    if gemini_bin not in current_path:
+        env["PATH"] = f"{gemini_bin}:/root/.gemini/bin:{current_path}"
+    return env
+
 
 def ask_antigravity(
     prompt: str,
@@ -208,7 +631,7 @@ def ask_antigravity(
         cmd.extend(["--conversation", conversation_id])
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=_get_subprocess_env())
     except FileNotFoundError:
         return {
             "error": f"agy binary not found at '{agy_bin}'. Ensure Antigravity is installed/mounted.",
@@ -296,6 +719,363 @@ def ask_antigravity_vision(
                 pass
 
 
+def chat_complete_antigravity(
+    messages: List[Any],
+    model: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
+    effort: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Execute OpenAI-compatible chat completion using Antigravity."""
+    prompt = format_messages_for_antigravity(messages, tools=tools, tool_choice=tool_choice)
+    agy_bin = _find_agy_bin()
+    default_model = os.getenv("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
+    chosen_model = model if (model and is_antigravity_model(model)) else default_model
+    chosen_effort = effort or os.getenv("ANTIGRAVITY_EFFORT")
+
+    cmd = [
+        agy_bin,
+        "-p", prompt,
+        "--model", chosen_model,
+        "--output-format", "json",
+        "--dangerously-skip-permissions",
+        "--disable-slash-commands",
+    ]
+    if chosen_effort:
+        cmd.extend(["--effort", chosen_effort])
+    if conversation_id:
+        cmd.extend(["--conversation", conversation_id])
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=_get_subprocess_env())
+    except FileNotFoundError:
+        return {
+            "error": f"agy binary not found at '{agy_bin}'. Ensure Antigravity is installed/mounted.",
+            "model": chosen_model,
+            "provider": "antigravity",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "error": "Antigravity process timed out after 180 seconds.",
+            "model": chosen_model,
+            "provider": "antigravity",
+        }
+
+    if proc.returncode != 0:
+        err_msg = proc.stderr.strip() or proc.stdout.strip() or f"Process exited with code {proc.returncode}"
+        return {
+            "error": f"agy execution error: {err_msg}",
+            "model": chosen_model,
+            "provider": "antigravity",
+        }
+
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        data = {"response": proc.stdout.strip()}
+
+    raw_response = (data.get("response") or "").strip()
+    usage_data = data.get("usage", {})
+    usage = {
+        "prompt_tokens": usage_data.get("input_tokens", 0),
+        "completion_tokens": usage_data.get("output_tokens", 0),
+        "total_tokens": usage_data.get("total_tokens", 0),
+    }
+
+    content, parsed_tool_calls = parse_tool_calls_from_text(raw_response) if tools else (raw_response, None)
+    finish_reason = "tool_calls" if parsed_tool_calls else "stop"
+
+    msg: Dict[str, Any] = {
+        "role": "assistant",
+        "content": content,
+    }
+    if parsed_tool_calls:
+        msg["tool_calls"] = parsed_tool_calls
+
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created_ts = int(time.time())
+
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created_ts,
+        "model": chosen_model,
+        "provider": "antigravity",
+        "choices": [{
+            "index": 0,
+            "message": msg,
+            "finish_reason": finish_reason,
+        }],
+        "usage": usage,
+    }
+
+
+def chat_stream_antigravity(
+    messages: List[Any],
+    model: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
+    stream_options: Optional[Dict[str, Any]] = None,
+    effort: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    **kwargs,
+) -> Generator[str, None, None]:
+    """Stream chat completions from Antigravity as Server-Sent Events."""
+    prompt = format_messages_for_antigravity(messages, tools=tools, tool_choice=tool_choice)
+    agy_bin = _find_agy_bin()
+    default_model = os.getenv("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
+    chosen_model = model if (model and is_antigravity_model(model)) else default_model
+    chosen_effort = effort or os.getenv("ANTIGRAVITY_EFFORT")
+
+    cmd = [
+        agy_bin,
+        "-p", prompt,
+        "--model", chosen_model,
+        "--output-format", "stream-json",
+        "--dangerously-skip-permissions",
+        "--disable-slash-commands",
+    ]
+    if chosen_effort:
+        cmd.extend(["--effort", chosen_effort])
+    if conversation_id:
+        cmd.extend(["--conversation", conversation_id])
+
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created_ts = int(time.time())
+
+    # Send initial role delta chunk
+    init_chunk = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created_ts,
+        "model": chosen_model,
+        "choices": [{
+            "index": 0,
+            "delta": {"role": "assistant"},
+            "logprobs": None,
+            "finish_reason": None,
+        }],
+    }
+    yield f"data: {json.dumps(init_chunk)}\n\n"
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=_get_subprocess_env(),
+        )
+    except Exception as e:
+        err_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": chosen_model,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": f"\n[Error launching Antigravity: {e}]"},
+                "finish_reason": "stop",
+            }],
+        }
+        yield f"data: {json.dumps(err_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    full_text = []
+    final_usage = None
+    is_tool_mode = bool(tools and tool_choice != "none")
+    buffer: List[str] = []
+    detected_tool_call = False
+    flushed_buffer = False
+
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event_data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        evt = event_data.get("event")
+        if evt == "step_update":
+            delta_text = event_data.get("step_update", {}).get("text_delta", "")
+            if not delta_text:
+                continue
+
+            full_text.append(delta_text)
+
+            if not is_tool_mode:
+                chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": chosen_model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": delta_text},
+                        "logprobs": None,
+                        "finish_reason": None,
+                    }],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            else:
+                # In tool mode: buffer until we know if it is a tool call or plain text
+                if not flushed_buffer and not detected_tool_call:
+                    buffer.append(delta_text)
+                    combined_buffer = "".join(buffer).lstrip()
+                    if combined_buffer.startswith("```") or combined_buffer.startswith("{"):
+                        detected_tool_call = True
+                    elif len(combined_buffer) > 20:
+                        flushed_buffer = True
+                        chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": chosen_model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": "".join(buffer)},
+                                "logprobs": None,
+                                "finish_reason": None,
+                            }],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                elif flushed_buffer:
+                    chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_ts,
+                        "model": chosen_model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": delta_text},
+                            "logprobs": None,
+                            "finish_reason": None,
+                        }],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+
+        elif evt == "result":
+            res = event_data.get("result", {})
+            raw_usage = res.get("usage", {})
+            if raw_usage:
+                final_usage = {
+                    "prompt_tokens": raw_usage.get("input_tokens", 0),
+                    "completion_tokens": raw_usage.get("output_tokens", 0),
+                    "total_tokens": raw_usage.get("total_tokens", 0),
+                }
+
+    proc.wait()
+
+    # Handle completion when tools were requested
+    if is_tool_mode and not flushed_buffer:
+        entire_output = "".join(full_text).strip()
+        cleaned_content, parsed_tool_calls = parse_tool_calls_from_text(entire_output)
+        if parsed_tool_calls:
+            tc_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_ts,
+                "model": chosen_model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": idx,
+                                "id": tc["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tc["function"]["name"],
+                                    "arguments": tc["function"]["arguments"],
+                                },
+                            }
+                            for idx, tc in enumerate(parsed_tool_calls)
+                        ]
+                    },
+                    "logprobs": None,
+                    "finish_reason": None,
+                }],
+            }
+            yield f"data: {json.dumps(tc_chunk)}\n\n"
+            finish_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_ts,
+                "model": chosen_model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls",
+                }],
+            }
+            yield f"data: {json.dumps(finish_chunk)}\n\n"
+        else:
+            if entire_output:
+                chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": chosen_model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": entire_output},
+                        "finish_reason": None,
+                    }],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            finish_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_ts,
+                "model": chosen_model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }],
+            }
+            yield f"data: {json.dumps(finish_chunk)}\n\n"
+    else:
+        finish_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": chosen_model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+        }
+        yield f"data: {json.dumps(finish_chunk)}\n\n"
+
+    # Optional usage chunk
+    if final_usage and (stream_options and stream_options.get("include_usage")):
+        usage_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": chosen_model,
+            "choices": [],
+            "usage": final_usage,
+        }
+        yield f"data: {json.dumps(usage_chunk)}\n\n"
+
+    yield "data: [DONE]\n\n"
+
+
 # ── Unified Dispatchers ───────────────────────────────────────────────────────
 
 def dispatch_ask(
@@ -332,4 +1112,58 @@ def dispatch_ask_vision(
         image_b64=image_b64,
         mime_type=mime_type,
         model=model,
+    )
+
+
+def dispatch_chat_completion(
+    messages: List[Any],
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Route chat completion to the appropriate backend."""
+    active_provider = resolve_provider(model=model, provider=provider)
+    if active_provider == "antigravity":
+        return chat_complete_antigravity(
+            messages=messages,
+            model=model,
+            tools=tools,
+            tool_choice=tool_choice,
+            **kwargs,
+        )
+    return chat_complete_copilot(
+        messages=messages,
+        model=model,
+        tools=tools,
+        tool_choice=tool_choice,
+        **kwargs,
+    )
+
+
+def dispatch_chat_stream(
+    messages: List[Any],
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+    **kwargs,
+) -> Generator[str, None, None]:
+    """Route streaming chat completion to the appropriate backend."""
+    active_provider = resolve_provider(model=model, provider=provider)
+    if active_provider == "antigravity":
+        return chat_stream_antigravity(
+            messages=messages,
+            model=model,
+            tools=tools,
+            tool_choice=tool_choice,
+            **kwargs,
+        )
+    return chat_stream_copilot(
+        messages=messages,
+        model=model,
+        tools=tools,
+        tool_choice=tool_choice,
+        **kwargs,
     )

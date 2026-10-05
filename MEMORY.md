@@ -18,15 +18,18 @@
   - Antigravity sessions are inherited from the host mount of `$HOME/.gemini`.
   - External clients (Home Assistant, n8n, Open WebUI, Continue.dev, curl, mobile apps) use internal Bearer tokens configured in `.env` (`API_KEYS`).
 - **Dual Consumption Modes**:
-  - *Asynchronous with Redis Queue (RQ)*: for long-running prompts or image analysis (`/ask`, `/ask-image`, `/result/{job_id}`).
-  - *Synchronous OpenAI-Compatible*: drop-in replacement for any client supporting custom base URLs (`/v1/chat/completions`).
+  - *Asynchronous with Redis Queue (RQ)*: for long-running batch prompts or image analysis (`/ask`, `/ask-image`, `/result/{job_id}`).
+  - *OpenAI-Compatible & Agent Harness Gateway*: drop-in replacement for OpenAI/Ollama clients and coding agents (Pi Coding Agent, Aider, Open WebUI, Continue.dev, LangChain, AutoGen) with:
+    - Real-time Server-Sent Events (SSE `stream: true`).
+    - Tool / Function Calling (`tools`, `tool_choice`, `tool_calls`).
+    - Multi-turn conversation support (`system`, `user`, `assistant`, `tool` roles).
+    - Standard model discovery (`GET /v1/models` and `GET /v1/models/{model_id}`).
 - **Production-Grade VPS Security**:
   - Caddy reverse proxy with automated TLS/HTTPS certificates (ports `80`/`443`).
-  - Internal application ports (`8000` for FastAPI, `6379` for Redis) isolated within the Docker `backend` network (preventing conflicts with Portainer or other services on `:8000`).
-  - Per-token rate limiting backed by Redis sliding minute buckets (`RATE_LIMIT_RPM`).
+  - Internal application ports (`8000` for FastAPI, `6379` for Redis) isolated within the Docker `backend` network.
+  - Per-token rate limiting backed by Redis sliding minute buckets (`RATE_LIMIT_RPM`) with fail-open resilience.
 - **100% Backward-Compatible Model Aliasing**:
-  - If a legacy client requests Copilot/OpenAI models (e.g. `gpt-4o-mini`, `gpt-4o`) while the active provider is `antigravity`, the worker transparently aliases the request to the default Antigravity model (`gemini-3.8-flash-high`) without breaking clients.
-  - The synchronous `/v1/chat/completions` endpoint polls for up to 180s to accommodate deep reasoning models.
+  - If a client requests Copilot/OpenAI models (e.g. `gpt-4o-mini`, `gpt-4o`) while the active provider is `antigravity`, the system transparently aliases the request to the default Antigravity model (`gemini-3.8-flash-high`) without breaking clients.
 
 ---
 
