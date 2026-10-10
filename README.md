@@ -259,6 +259,42 @@ curl "https://$DOMAIN/health"
 
 ---
 
+### `GET /v1/antigravity/usage` & `GET /usage`
+
+Inspects real-time consumption, daily conversation/step counts, and quota status (`RESOURCE_EXHAUSTED` / rate limits):
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" "https://$DOMAIN/v1/antigravity/usage"
+# Or in browser / dashboard with query parameter:
+curl "https://$DOMAIN/usage?api_key=$API_KEY"
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "provider": "antigravity",
+  "quota_status": {
+    "is_rate_limited": false,
+    "reset_in": null,
+    "last_exhausted_error": null
+  },
+  "summary": {
+    "total_conversations": 53,
+    "total_step_turns": 382,
+    "days_tracked": 4
+  },
+  "daily_usage": [
+    {"date": "2026-10-10", "conversations": 7, "step_turns": 38},
+    {"date": "2026-10-05", "conversations": 27, "step_turns": 164},
+    {"date": "2026-10-04", "conversations": 17, "step_turns": 180}
+  ],
+  "recent_conversations": [ ... ]
+}
+```
+
+---
+
 ## Model Selection & Providers
 
 ### Provider 1: Google Antigravity (`PROVIDER=antigravity`)
