@@ -141,6 +141,118 @@ def _conversation_exists_in_agy(conversation_id: str) -> bool:
     return False
 
 
+def get_antigravity_usage_stats() -> Dict[str, Any]:
+    """
+    Extract usage statistics, daily breakdown, recent conversations,
+    and quota limit / error status from Antigravity's local SQLite database and logs.
+    """
+    db_candidates = [
+        os.path.expanduser("~/.gemini/antigravity-cli/conversation_summaries.db"),
+        "/root/.gemini/antigravity-cli/conversation_summaries.db",
+    ]
+    db_path = next((p for p in db_candidates if os.path.exists(p)), None)
+
+    summary = {
+        "total_conversations": 0,
+        "total_step_turns": 0,
+        "days_tracked": 0,
+    }
+    daily_usage: List[Dict[str, Any]] = []
+    recent_conversations: List[Dict[str, Any]] = []
+
+    if db_path:
+        try:
+            conn = sqlite3.connect(db_path, timeout=2.0)
+            cur = conn.cursor()
+
+            tot_row = cur.execute(
+                "SELECT count(*), coalesce(sum(step_count), 0) FROM conversation_summaries WHERE last_modified_time > '2000'"
+            ).fetchone()
+            if tot_row:
+                summary["total_conversations"] = tot_row[0]
+                summary["total_step_turns"] = tot_row[1]
+
+            days_rows = cur.execute(
+                """
+                SELECT substr(last_modified_time, 1, 10) as day, count(*), coalesce(sum(step_count), 0)
+                FROM conversation_summaries
+                WHERE last_modified_time > '2000'
+                GROUP BY day
+                ORDER BY day DESC
+                LIMIT 30
+                """
+            ).fetchall()
+            summary["days_tracked"] = len(days_rows)
+            for d, c, s in days_rows:
+                daily_usage.append({
+                    "date": d,
+                    "conversations": c,
+                    "step_turns": s,
+                })
+
+            recent_rows = cur.execute(
+                """
+                SELECT conversation_id, title, step_count, last_modified_time
+                FROM conversation_summaries
+                WHERE last_modified_time > '2000'
+                ORDER BY last_modified_time DESC
+                LIMIT 10
+                """
+            ).fetchall()
+            for cid, title, steps, lm in recent_rows:
+                recent_conversations.append({
+                    "conversation_id": cid,
+                    "title": title or "Untitled",
+                    "step_count": steps,
+                    "last_modified": str(lm)[:19],
+                })
+            conn.close()
+        except Exception as e:
+            logger.exception("Error querying conversation_summaries.db: %s", e)
+
+    log_candidates = [
+        os.path.expanduser("~/.gemini/antigravity-cli/log"),
+        "/root/.gemini/antigravity-cli/log",
+    ]
+    log_dir = next((p for p in log_candidates if os.path.isdir(p)), None)
+
+    quota_status = {
+        "is_rate_limited": False,
+        "reset_in": None,
+        "last_exhausted_error": None,
+        "last_log_file": None,
+    }
+
+    if log_dir:
+        import glob
+        logs = sorted(glob.glob(os.path.join(log_dir, "cli-*.log")))
+        for lf in reversed(logs[-10:]):
+            try:
+                with open(lf, "r", errors="ignore") as f:
+                    content = f.read()
+                    if "RESOURCE_EXHAUSTED" in content:
+                        quota_status["is_rate_limited"] = True
+                        m = re.search(r"Resets in ([^\n.]+)", content)
+                        if m:
+                            quota_status["reset_in"] = m.group(1).strip()
+                        err_m = re.search(r"RESOURCE_EXHAUSTED[^\n]+", content)
+                        if err_m:
+                            quota_status["last_exhausted_error"] = err_m.group(0).strip()
+                        quota_status["last_log_file"] = os.path.basename(lf)
+                        break
+            except Exception:
+                pass
+
+    return {
+        "status": "ok",
+        "provider": "antigravity",
+        "quota_status": quota_status,
+        "summary": summary,
+        "daily_usage": daily_usage,
+        "recent_conversations": recent_conversations,
+    }
+
+
 def _get_github_token() -> str:
     """Extract GitHub token from env, mounted gh config, or gh CLI."""
     token = os.getenv("GITHUB_TOKEN", "").strip()

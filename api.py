@@ -15,6 +15,7 @@ from tasks import (
     dispatch_ask_vision,
     dispatch_chat_completion,
     dispatch_chat_stream,
+    get_antigravity_usage_stats,
     resolve_provider,
     ANTIGRAVITY_MODELS,
     COPILOT_MODELS,
@@ -60,11 +61,14 @@ def _get_valid_api_keys() -> set[str]:
 def _extract_api_key(
     authorization: str | None,
     x_api_key: str | None,
+    api_key_query: str | None = None,
 ) -> str | None:
     if x_api_key:
         return x_api_key.strip()
     if authorization and authorization.lower().startswith("bearer "):
         return authorization[7:].strip()
+    if api_key_query:
+        return api_key_query.strip()
     return None
 
 
@@ -72,6 +76,7 @@ def auth_and_rate_limit(
     request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    api_key: str | None = Query(default=None, alias="api_key"),
 ):
     valid_keys = _get_valid_api_keys()
     if not valid_keys:
@@ -80,7 +85,7 @@ def auth_and_rate_limit(
             detail="No API key configured. Set API_KEYS or API_KEY on the server",
         )
 
-    provided_key = _extract_api_key(authorization, x_api_key)
+    provided_key = _extract_api_key(authorization, x_api_key, api_key)
     if not provided_key or provided_key not in valid_keys:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -225,6 +230,16 @@ def health(
         if not valid_keys or not provided_key or provided_key not in valid_keys:
             raise HTTPException(status_code=401, detail="Invalid API key")
     return {"status": "ok", "provider": DEFAULT_PROVIDER}
+
+
+@app.get("/v1/antigravity/usage")
+@app.get("/usage")
+def antigravity_usage(_: None = Depends(auth_and_rate_limit)):
+    """
+    Retrieve real-time Antigravity consumption statistics,
+    day-by-day request counts, recent sessions, and quota/rate limit status.
+    """
+    return get_antigravity_usage_stats()
 
 
 # ── Vision Endpoint ──────────────────────────────────────────────────────────
