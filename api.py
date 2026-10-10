@@ -3,7 +3,7 @@ import base64
 import time
 import hashlib
 from typing import Optional, Union, List, Dict, Any
-from fastapi import FastAPI, HTTPException, Query, Body, UploadFile, File, Form, Depends, Header, Request
+from fastapi import FastAPI, HTTPException, Query, Body, UploadFile, File, Form, Depends, Header, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from redis import Redis
@@ -311,21 +311,45 @@ class ChatRequest(BaseModel):
     presence_penalty: Optional[float] = None
     response_format: Optional[Dict[str, Any]] = None
     provider: Optional[str] = None
+    user: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 @app.post("/v1/chat/completions")
-def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_rate_limit)):
+def chat_completions(
+    response: Response,
+    body: ChatRequest = Body(...),
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-Id"),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    conversation_id_query: Optional[str] = Query(None, alias="conversation_id"),
+    _: None = Depends(auth_and_rate_limit),
+):
     """
     OpenAI-compatible chat completions endpoint.
     Supports real-time streaming (SSE text/event-stream), tool/function calling,
-    multi-turn conversations, and both Antigravity and Copilot providers.
+    multi-turn conversations, session reuse, and both Antigravity and Copilot providers.
     """
     if not body.messages:
         raise HTTPException(status_code=400, detail="messages list must not be empty")
 
     effective_max_tokens = body.max_tokens or body.max_completion_tokens
+    conv_id = (
+        body.conversation_id
+        or x_conversation_id
+        or x_session_id
+        or conversation_id_query
+        or body.user
+    )
 
     if body.stream:
+        stream_headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        if conv_id:
+            stream_headers["X-Conversation-Id"] = conv_id
+
         return StreamingResponse(
             dispatch_chat_stream(
                 messages=body.messages,
@@ -337,13 +361,10 @@ def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_r
                 max_tokens=effective_max_tokens,
                 stop=body.stop,
                 stream_options=body.stream_options,
+                conversation_id=conv_id,
             ),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
+            headers=stream_headers,
         )
 
     result = dispatch_chat_completion(
@@ -355,9 +376,14 @@ def chat_completions(body: ChatRequest = Body(...), _: None = Depends(auth_and_r
         temperature=body.temperature,
         max_tokens=effective_max_tokens,
         stop=body.stop,
+        conversation_id=conv_id,
     )
 
     if "error" in result and result.get("error"):
         raise HTTPException(status_code=502, detail=result["error"])
+
+    ret_conv_id = result.get("conversation_id") or conv_id
+    if ret_conv_id:
+        response.headers["X-Conversation-Id"] = ret_conv_id
 
     return result

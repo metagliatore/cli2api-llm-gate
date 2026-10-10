@@ -20,6 +20,7 @@ import shutil
 import base64
 import tempfile
 import logging
+import sqlite3
 import subprocess
 from typing import Optional, Union, List, Dict, Any, Generator
 
@@ -113,6 +114,31 @@ def _find_agy_bin() -> str:
         if os.path.exists(c):
             return c
     return "agy"
+
+
+def _conversation_exists_in_agy(conversation_id: str) -> bool:
+    """Check if conversation_id already exists in Antigravity's local DB."""
+    if not conversation_id:
+        return False
+    candidate_dbs = [
+        os.path.expanduser("~/.gemini/antigravity-cli/conversation_summaries.db"),
+        "/root/.gemini/antigravity-cli/conversation_summaries.db",
+    ]
+    for db_path in candidate_dbs:
+        if os.path.exists(db_path):
+            try:
+                conn = sqlite3.connect(db_path, timeout=1.0)
+                cur = conn.cursor()
+                row = cur.execute(
+                    "SELECT conversation_id FROM conversation_summaries WHERE conversation_id = ? LIMIT 1",
+                    (conversation_id,),
+                ).fetchone()
+                conn.close()
+                if row:
+                    return True
+            except Exception:
+                pass
+    return False
 
 
 def _get_github_token() -> str:
@@ -237,14 +263,29 @@ def format_messages_for_antigravity(
     messages: List[Any],
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[Any] = None,
+    incremental: bool = False,
 ) -> str:
     """
-    Format chat messages and optional tool specifications into a prompt for agy.
+    Format chat messages and optional tool specifications into an optimized prompt for agy.
+    If incremental=True, only the latest turns since the last assistant message are sent,
+    saving thousands of prompt tokens when resuming an active Antigravity conversation.
     """
+    target_messages = messages
+    if incremental and len(messages) > 1:
+        last_asst_idx = -1
+        for idx in range(len(messages) - 1, -1, -1):
+            m = messages[idx]
+            r = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+            if r == "assistant":
+                last_asst_idx = idx
+                break
+        if last_asst_idx != -1 and last_asst_idx < len(messages) - 1:
+            target_messages = messages[last_asst_idx + 1:]
+
     system_prompts: List[str] = []
     conversation_turns: List[str] = []
 
-    for msg in messages:
+    for msg in target_messages:
         if isinstance(msg, dict):
             role = msg.get("role", "user")
             content = msg.get("content")
@@ -261,7 +302,8 @@ def format_messages_for_antigravity(
         text = extract_text_from_content(content)
 
         if role in ("system", "developer"):
-            if text:
+            # When incremental, system instructions are already stored in the conversation session
+            if text and not incremental:
                 system_prompts.append(text)
         elif role == "user":
             conversation_turns.append(f"User: {text}")
@@ -270,7 +312,7 @@ def format_messages_for_antigravity(
             if text:
                 parts.append(text)
             if tool_calls:
-                parts.append(f"```json\n{{\"tool_calls\": {json.dumps(tool_calls)}}}\n```")
+                parts.append(f"```json\n{{\"tool_calls\":{json.dumps(tool_calls, separators=(',', ':'))}}}\n```")
             conversation_turns.append(f"Assistant: {' '.join(parts) if parts else ''}")
         elif role in ("tool", "function"):
             identifier = name or tool_call_id or "tool"
@@ -283,28 +325,21 @@ def format_messages_for_antigravity(
         prompt_sections.append("[System Instructions]\n" + "\n\n".join(system_prompts))
 
     if tools and tool_choice != "none":
+        # Minify tool specifications to eliminate whitespace token bloat
+        tools_minified = json.dumps(tools, separators=(',', ':'))
         tool_instruction = (
             "[Available Tools]\n"
-            "You have access to the following tools:\n"
-            f"{json.dumps(tools, indent=2)}\n\n"
-            "If you decide to invoke any tool, respond ONLY with a ```json markdown block containing:\n"
+            f"{tools_minified}\n"
+            "If invoking a tool, respond ONLY with:\n"
             "```json\n"
-            "{\n"
-            '  "tool_calls": [\n'
-            "    {\n"
-            '      "name": "<tool_name>",\n'
-            '      "arguments": { <arguments_dict> }\n'
-            "    }\n"
-            "  ]\n"
-            "}\n"
+            '{"tool_calls":[{"name":"<tool_name>","arguments":{<args>}}]}\n'
             "```\n"
-            "Do NOT include conversational text before or after the JSON block when calling tools.\n"
-            "If no tool call is needed, provide your regular text answer directly without wrapping in tool_calls JSON."
+            "Otherwise, respond with text answer directly."
         )
         if isinstance(tool_choice, dict) and "function" in tool_choice:
             func_name = tool_choice["function"].get("name")
             if func_name:
-                tool_instruction += f"\nYou MUST invoke the function '{func_name}'."
+                tool_instruction += f"\nYou MUST invoke function '{func_name}'."
         elif tool_choice == "required":
             tool_instruction += "\nYou MUST invoke at least one tool."
 
@@ -763,7 +798,10 @@ def chat_complete_antigravity(
     **kwargs,
 ) -> Dict[str, Any]:
     """Execute OpenAI-compatible chat completion using Antigravity."""
-    prompt = format_messages_for_antigravity(messages, tools=tools, tool_choice=tool_choice)
+    incremental = bool(conversation_id and _conversation_exists_in_agy(conversation_id))
+    prompt = format_messages_for_antigravity(
+        messages, tools=tools, tool_choice=tool_choice, incremental=incremental
+    )
     agy_bin = _find_agy_bin()
     default_model = os.getenv("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
     chosen_model = model if (model and is_antigravity_model(model)) else default_model
@@ -817,6 +855,10 @@ def chat_complete_antigravity(
         "completion_tokens": usage_data.get("output_tokens", 0),
         "total_tokens": usage_data.get("total_tokens", 0),
     }
+    if usage_data.get("cache_read_tokens"):
+        usage["prompt_tokens_details"] = {
+            "cached_tokens": usage_data.get("cache_read_tokens", 0)
+        }
 
     content, parsed_tool_calls = parse_tool_calls_from_text(raw_response) if tools else (raw_response, None)
     finish_reason = "tool_calls" if parsed_tool_calls else "stop"
@@ -830,8 +872,9 @@ def chat_complete_antigravity(
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created_ts = int(time.time())
+    active_conv_id = data.get("conversation_id") or conversation_id
 
-    return {
+    res_payload = {
         "id": completion_id,
         "object": "chat.completion",
         "created": created_ts,
@@ -844,6 +887,11 @@ def chat_complete_antigravity(
         }],
         "usage": usage,
     }
+    if active_conv_id:
+        res_payload["conversation_id"] = active_conv_id
+        res_payload["system_fingerprint"] = active_conv_id
+
+    return res_payload
 
 
 def chat_stream_antigravity(
@@ -859,8 +907,11 @@ def chat_stream_antigravity(
     conversation_id: Optional[str] = None,
     **kwargs,
 ) -> Generator[str, None, None]:
-    """Stream chat completions from Antigravity as Server-Sent Events."""
-    prompt = format_messages_for_antigravity(messages, tools=tools, tool_choice=tool_choice)
+    """Stream chat completions from Antigravity as Server-Sent Events with abort safety and session reuse."""
+    incremental = bool(conversation_id and _conversation_exists_in_agy(conversation_id))
+    prompt = format_messages_for_antigravity(
+        messages, tools=tools, tool_choice=tool_choice, incremental=incremental
+    )
     agy_bin = _find_agy_bin()
     default_model = os.getenv("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
     chosen_model = model if (model and is_antigravity_model(model)) else default_model
@@ -881,6 +932,7 @@ def chat_stream_antigravity(
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created_ts = int(time.time())
+    active_conv_id = conversation_id
 
     # Send initial role delta chunk
     init_chunk = {
@@ -895,6 +947,9 @@ def chat_stream_antigravity(
             "finish_reason": None,
         }],
     }
+    if active_conv_id:
+        init_chunk["conversation_id"] = active_conv_id
+        init_chunk["system_fingerprint"] = active_conv_id
     yield f"data: {json.dumps(init_chunk)}\n\n"
 
     try:
@@ -918,6 +973,9 @@ def chat_stream_antigravity(
                 "finish_reason": "stop",
             }],
         }
+        if active_conv_id:
+            err_chunk["conversation_id"] = active_conv_id
+            err_chunk["system_fingerprint"] = active_conv_id
         yield f"data: {json.dumps(err_chunk)}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -928,62 +986,30 @@ def chat_stream_antigravity(
     buffer: List[str] = []
     detected_tool_call = False
     flushed_buffer = False
-
     error_msg = None
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event_data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
 
-        evt = event_data.get("event")
-        if evt == "step_update":
-            delta_text = event_data.get("step_update", {}).get("text_delta", "")
-            if not delta_text:
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event_data = json.loads(line)
+            except json.JSONDecodeError:
                 continue
 
-            full_text.append(delta_text)
+            if event_data.get("conversation_id"):
+                active_conv_id = event_data["conversation_id"]
 
-            if not is_tool_mode:
-                chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_ts,
-                    "model": chosen_model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": delta_text},
-                        "logprobs": None,
-                        "finish_reason": None,
-                    }],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-            else:
-                # In tool mode: buffer until we know if it is a tool call or plain text
-                if not flushed_buffer and not detected_tool_call:
-                    buffer.append(delta_text)
-                    combined_buffer = "".join(buffer).lstrip()
-                    if combined_buffer.startswith("```") or combined_buffer.startswith("{"):
-                        detected_tool_call = True
-                    elif len(combined_buffer) > 20:
-                        flushed_buffer = True
-                        chunk = {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created_ts,
-                            "model": chosen_model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {"content": "".join(buffer)},
-                                "logprobs": None,
-                                "finish_reason": None,
-                            }],
-                        }
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                elif flushed_buffer:
+            evt = event_data.get("event")
+            if evt == "step_update":
+                delta_text = event_data.get("step_update", {}).get("text_delta", "")
+                if not delta_text:
+                    continue
+
+                full_text.append(delta_text)
+
+                if not is_tool_mode:
                     chunk = {
                         "id": completion_id,
                         "object": "chat.completion.chunk",
@@ -996,20 +1022,93 @@ def chat_stream_antigravity(
                             "finish_reason": None,
                         }],
                     }
+                    if active_conv_id:
+                        chunk["conversation_id"] = active_conv_id
+                        chunk["system_fingerprint"] = active_conv_id
                     yield f"data: {json.dumps(chunk)}\n\n"
+                else:
+                    # In tool mode: buffer until we know if it is a tool call or plain text
+                    if not flushed_buffer and not detected_tool_call:
+                        buffer.append(delta_text)
+                        combined_buffer = "".join(buffer).lstrip()
+                        if combined_buffer.startswith("```") or combined_buffer.startswith("{"):
+                            detected_tool_call = True
+                        elif len(combined_buffer) > 20:
+                            flushed_buffer = True
+                            chunk = {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_ts,
+                                "model": chosen_model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": "".join(buffer)},
+                                    "logprobs": None,
+                                    "finish_reason": None,
+                                }],
+                            }
+                            if active_conv_id:
+                                chunk["conversation_id"] = active_conv_id
+                                chunk["system_fingerprint"] = active_conv_id
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                    elif flushed_buffer:
+                        chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": chosen_model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": delta_text},
+                                "logprobs": None,
+                                "finish_reason": None,
+                            }],
+                        }
+                        if active_conv_id:
+                            chunk["conversation_id"] = active_conv_id
+                            chunk["system_fingerprint"] = active_conv_id
+                        yield f"data: {json.dumps(chunk)}\n\n"
 
-        elif evt == "result":
-            res = event_data.get("result", {})
-            error_msg = res.get("error")
-            raw_usage = res.get("usage", {})
-            if raw_usage:
-                final_usage = {
-                    "prompt_tokens": raw_usage.get("input_tokens", 0),
-                    "completion_tokens": raw_usage.get("output_tokens", 0),
-                    "total_tokens": raw_usage.get("total_tokens", 0),
-                }
+            elif evt == "result":
+                res = event_data.get("result", {})
+                if res.get("conversation_id"):
+                    active_conv_id = res["conversation_id"]
+                error_msg = res.get("error")
+                raw_usage = res.get("usage", {})
+                if raw_usage:
+                    final_usage = {
+                        "prompt_tokens": raw_usage.get("input_tokens", 0),
+                        "completion_tokens": raw_usage.get("output_tokens", 0),
+                        "total_tokens": raw_usage.get("total_tokens", 0),
+                    }
+                    if raw_usage.get("cache_read_tokens"):
+                        final_usage["prompt_tokens_details"] = {
+                            "cached_tokens": raw_usage.get("cache_read_tokens", 0)
+                        }
 
-    proc.wait()
+        proc.wait()
+
+    except GeneratorExit:
+        logger.info("Client aborted/disconnected stream; terminating agy process PID %s", proc.pid)
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        raise
+    finally:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
     # If agy reported an error and no output was produced, yield error chunk
     if (proc.returncode != 0 or error_msg) and not full_text:
@@ -1025,6 +1124,9 @@ def chat_stream_antigravity(
                 "finish_reason": "stop",
             }],
         }
+        if active_conv_id:
+            err_chunk["conversation_id"] = active_conv_id
+            err_chunk["system_fingerprint"] = active_conv_id
         yield f"data: {json.dumps(err_chunk)}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -1059,6 +1161,9 @@ def chat_stream_antigravity(
                     "finish_reason": None,
                 }],
             }
+            if active_conv_id:
+                tc_chunk["conversation_id"] = active_conv_id
+                tc_chunk["system_fingerprint"] = active_conv_id
             yield f"data: {json.dumps(tc_chunk)}\n\n"
             finish_chunk = {
                 "id": completion_id,
@@ -1071,6 +1176,9 @@ def chat_stream_antigravity(
                     "finish_reason": "tool_calls",
                 }],
             }
+            if active_conv_id:
+                finish_chunk["conversation_id"] = active_conv_id
+                finish_chunk["system_fingerprint"] = active_conv_id
             yield f"data: {json.dumps(finish_chunk)}\n\n"
         else:
             if entire_output:
@@ -1085,6 +1193,9 @@ def chat_stream_antigravity(
                         "finish_reason": None,
                     }],
                 }
+                if active_conv_id:
+                    chunk["conversation_id"] = active_conv_id
+                    chunk["system_fingerprint"] = active_conv_id
                 yield f"data: {json.dumps(chunk)}\n\n"
             finish_chunk = {
                 "id": completion_id,
@@ -1097,6 +1208,9 @@ def chat_stream_antigravity(
                     "finish_reason": "stop",
                 }],
             }
+            if active_conv_id:
+                finish_chunk["conversation_id"] = active_conv_id
+                finish_chunk["system_fingerprint"] = active_conv_id
             yield f"data: {json.dumps(finish_chunk)}\n\n"
     else:
         finish_chunk = {
@@ -1110,6 +1224,9 @@ def chat_stream_antigravity(
                 "finish_reason": "stop",
             }],
         }
+        if active_conv_id:
+            finish_chunk["conversation_id"] = active_conv_id
+            finish_chunk["system_fingerprint"] = active_conv_id
         yield f"data: {json.dumps(finish_chunk)}\n\n"
 
     # Optional usage chunk
@@ -1122,6 +1239,9 @@ def chat_stream_antigravity(
             "choices": [],
             "usage": final_usage,
         }
+        if active_conv_id:
+            usage_chunk["conversation_id"] = active_conv_id
+            usage_chunk["system_fingerprint"] = active_conv_id
         yield f"data: {json.dumps(usage_chunk)}\n\n"
 
     yield "data: [DONE]\n\n"
