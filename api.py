@@ -15,6 +15,10 @@ from tasks import (
     dispatch_ask_vision,
     dispatch_chat_completion,
     dispatch_chat_stream,
+    dispatch_responses_completion,
+    dispatch_responses_stream,
+    convert_responses_input_to_messages,
+    adapt_responses_tools,
     get_antigravity_usage_stats,
     resolve_provider,
     ANTIGRAVITY_MODELS,
@@ -166,6 +170,7 @@ def result(job_id: str, _: None = Depends(auth_and_rate_limit)):
 # ── Models & Health ──────────────────────────────────────────────────────────
 
 @app.get("/v1/models")
+@app.get("/v1/chat/completions/models")
 def list_v1_models(_: None = Depends(auth_and_rate_limit)):
     """List available models in OpenAI-compatible schema."""
     return {
@@ -402,3 +407,106 @@ def chat_completions(
         response.headers["X-Conversation-Id"] = ret_conv_id
 
     return result
+
+
+# ── OpenAI Responses API Endpoint ─────────────────────────────────────────────
+# Dedicated endpoint for Home Assistant Assist, agent harnesses, and modern OpenAI Responses callers.
+
+class ResponseRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    model: Optional[str] = None
+    input: Optional[Union[str, List[Any]]] = None
+    instructions: Optional[str] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_output_tokens: Optional[int] = None
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = False
+    stream_options: Optional[Dict[str, Any]] = None
+    user: Optional[str] = None
+    conversation_id: Optional[str] = None
+    previous_response_id: Optional[str] = None
+    provider: Optional[str] = None
+
+
+@app.post("/v1/responses")
+@app.post("/responses")
+@app.post("/v1/chat/completions/responses")
+def responses_endpoint(
+    response: Response,
+    body: ResponseRequest = Body(...),
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-Id"),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-Id"),
+    conversation_id_query: Optional[str] = Query(None, alias="conversation_id"),
+    _: None = Depends(auth_and_rate_limit),
+):
+    """
+    OpenAI Responses API endpoint (`/v1/responses`).
+    Provides full compatibility for Home Assistant Assist (`client.responses.create`),
+    tool/entity controls, multi-turn states, and streaming Server-Sent Events.
+    """
+    messages = convert_responses_input_to_messages(
+        input_data=body.input,
+        instructions=body.instructions,
+    )
+    if not messages:
+        raise HTTPException(status_code=400, detail="input parameter must not be empty")
+
+    adapted_tools = adapt_responses_tools(body.tools)
+    effective_max_tokens = body.max_output_tokens or body.max_tokens
+    conv_id = (
+        body.conversation_id
+        or body.previous_response_id
+        or x_conversation_id
+        or x_session_id
+        or conversation_id_query
+        or body.user
+    )
+
+    if body.stream:
+        stream_headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        if conv_id:
+            stream_headers["X-Conversation-Id"] = conv_id
+
+        return StreamingResponse(
+            dispatch_responses_stream(
+                messages=messages,
+                model=body.model,
+                provider=body.provider,
+                tools=adapted_tools,
+                tool_choice=body.tool_choice,
+                temperature=body.temperature,
+                max_tokens=effective_max_tokens,
+                stream_options=body.stream_options,
+                conversation_id=conv_id,
+            ),
+            media_type="text/event-stream",
+            headers=stream_headers,
+        )
+
+    result = dispatch_responses_completion(
+        messages=messages,
+        model=body.model,
+        provider=body.provider,
+        tools=adapted_tools,
+        tool_choice=body.tool_choice,
+        temperature=body.temperature,
+        max_tokens=effective_max_tokens,
+        conversation_id=conv_id,
+    )
+
+    if "error" in result and result.get("error"):
+        raise HTTPException(status_code=502, detail=result["error"])
+
+    ret_conv_id = result.get("conversation_id") or conv_id
+    if ret_conv_id:
+        response.headers["X-Conversation-Id"] = ret_conv_id
+
+    return result
+

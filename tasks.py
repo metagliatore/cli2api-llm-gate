@@ -1450,3 +1450,520 @@ def dispatch_chat_stream(
         tool_choice=tool_choice,
         **kwargs,
     )
+
+
+# ── OpenAI Responses API Compatibility Layer ─────────────────────────────────
+# Supports Home Assistant v2025/2026 Core Assist (`client.responses.create`),
+# `ha-openai-compatible`, and modern OpenAI Responses SDK callers.
+
+def convert_responses_input_to_messages(
+    input_data: Union[str, List[Any], None],
+    instructions: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Convert OpenAI Responses API `input` parameter and `instructions` into
+    standard OpenAI Chat Completions `messages` format.
+    Supports text, multi-turn messages, function_call, and function_call_output items.
+    """
+    messages: List[Dict[str, Any]] = []
+
+    if instructions and str(instructions).strip():
+        messages.append({"role": "system", "content": str(instructions).strip()})
+
+    if not input_data:
+        return messages
+
+    if isinstance(input_data, str):
+        messages.append({"role": "user", "content": input_data})
+        return messages
+
+    if not isinstance(input_data, list):
+        messages.append({"role": "user", "content": str(input_data)})
+        return messages
+
+    for item in input_data:
+        if isinstance(item, str):
+            messages.append({"role": "user", "content": item})
+            continue
+
+        if not isinstance(item, dict):
+            if hasattr(item, "model_dump"):
+                item = item.model_dump()
+            elif hasattr(item, "__dict__"):
+                item = item.__dict__
+            else:
+                messages.append({"role": "user", "content": str(item)})
+                continue
+
+        item_type = item.get("type")
+
+        # 1. Tool result (function_call_output) -> tool message
+        if item_type == "function_call_output":
+            call_id = item.get("call_id") or item.get("id") or ""
+            raw_output = item.get("output", "")
+            if isinstance(raw_output, (dict, list)):
+                raw_output = json.dumps(raw_output)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": str(call_id),
+                "content": str(raw_output),
+            })
+            continue
+
+        # 2. Function call from assistant
+        if item_type == "function_call":
+            call_id = item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+            name = item.get("name", "")
+            raw_args = item.get("arguments", "{}")
+            if isinstance(raw_args, (dict, list)):
+                raw_args = json.dumps(raw_args)
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": str(call_id),
+                    "type": "function",
+                    "function": {
+                        "name": str(name),
+                        "arguments": str(raw_args),
+                    },
+                }],
+            })
+            continue
+
+        # 3. Message item (type="message" or standard role)
+        role = item.get("role") or "user"
+        if role == "developer":
+            role = "system"
+
+        content = item.get("content")
+        if isinstance(content, list):
+            text_parts = []
+            standard_parts = []
+            for part in content:
+                if isinstance(part, str):
+                    text_parts.append(part)
+                    standard_parts.append({"type": "text", "text": part})
+                elif isinstance(part, dict):
+                    p_type = part.get("type")
+                    if p_type in ("input_text", "text"):
+                        txt = part.get("text", "")
+                        text_parts.append(txt)
+                        standard_parts.append({"type": "text", "text": txt})
+                    elif p_type in ("input_image", "image_url"):
+                        img_url = part.get("image_url") or part.get("url")
+                        if isinstance(img_url, dict):
+                            standard_parts.append({"type": "image_url", "image_url": img_url})
+                        elif isinstance(img_url, str):
+                            standard_parts.append({"type": "image_url", "image_url": {"url": img_url}})
+                        elif "image" in part:
+                            standard_parts.append({"type": "image_url", "image_url": {"url": part["image"]}})
+                    else:
+                        if "text" in part:
+                            text_parts.append(part["text"])
+                            standard_parts.append({"type": "text", "text": part["text"]})
+
+            if standard_parts and all(p.get("type") == "text" for p in standard_parts):
+                content = "".join(text_parts)
+            else:
+                content = standard_parts
+
+        msg_obj: Dict[str, Any] = {"role": role, "content": content}
+        if item.get("name"):
+            msg_obj["name"] = item["name"]
+        if item.get("tool_calls"):
+            msg_obj["tool_calls"] = item["tool_calls"]
+        if item.get("tool_call_id"):
+            msg_obj["tool_call_id"] = item["tool_call_id"]
+
+        messages.append(msg_obj)
+
+    return messages
+
+
+def adapt_responses_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    """
+    Adapt tools from Responses API format (where function attributes may be top-level)
+    to Chat Completions format (tool["function"]).
+    """
+    if not tools:
+        return None
+    adapted = []
+    for tool in tools:
+        if isinstance(tool, dict):
+            if tool.get("type") == "function" and "function" not in tool and "name" in tool:
+                adapted.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name"),
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters", {}),
+                    },
+                })
+            else:
+                adapted.append(tool)
+        else:
+            adapted.append(tool)
+    return adapted
+
+
+def dispatch_responses_completion(
+    messages: List[Any],
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
+    conversation_id: Optional[str] = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Execute a non-streaming Responses API request by delegating to dispatch_chat_completion
+    and shaping the result into OpenAI Responses API schema.
+    """
+    chat_res = dispatch_chat_completion(
+        messages=messages,
+        model=model,
+        provider=provider,
+        tools=tools,
+        tool_choice=tool_choice,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stop=stop,
+        conversation_id=conversation_id,
+        **kwargs,
+    )
+    if "error" in chat_res and chat_res.get("error"):
+        return chat_res
+
+    resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+    created_ts = chat_res.get("created", int(time.time()))
+    res_model = chat_res.get("model", model or "default")
+
+    output_items: List[Dict[str, Any]] = []
+    choices = chat_res.get("choices") or []
+    if choices:
+        msg = choices[0].get("message") or {}
+        content_txt = msg.get("content")
+        tool_calls = msg.get("tool_calls") or []
+
+        if content_txt:
+            output_items.append({
+                "id": f"msg_{uuid.uuid4().hex[:12]}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": str(content_txt),
+                    "annotations": [],
+                }],
+            })
+
+        for tc in tool_calls:
+            tc_fn = tc.get("function") or {}
+            tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+            tc_args = tc_fn.get("arguments", "{}")
+            if isinstance(tc_args, (dict, list)):
+                tc_args = json.dumps(tc_args)
+            output_items.append({
+                "type": "function_call",
+                "id": tc_id,
+                "call_id": tc_id,
+                "name": tc_fn.get("name", ""),
+                "arguments": str(tc_args),
+                "status": "completed",
+            })
+    else:
+        output_items.append({
+            "id": f"msg_{uuid.uuid4().hex[:12]}",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{
+                "type": "output_text",
+                "text": "",
+                "annotations": [],
+            }],
+        })
+
+    usage_dict = None
+    if "usage" in chat_res and isinstance(chat_res["usage"], dict):
+        u = chat_res["usage"]
+        cached_tok = u.get("prompt_tokens_details", {}).get("cached_tokens", 0) if isinstance(u.get("prompt_tokens_details"), dict) else 0
+        usage_dict = {
+            "total_tokens": u.get("total_tokens", 0),
+            "input_tokens": u.get("prompt_tokens", 0),
+            "output_tokens": u.get("completion_tokens", 0),
+            "input_tokens_details": {
+                "cached_tokens": cached_tok,
+                "cache_write_tokens": 0,
+            },
+            "output_tokens_details": {
+                "reasoning_tokens": 0,
+            },
+        }
+
+    response_payload: Dict[str, Any] = {
+        "id": resp_id,
+        "object": "response",
+        "status": "completed",
+        "created_at": created_ts,
+        "model": res_model,
+        "output": output_items,
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    }
+    if usage_dict:
+        response_payload["usage"] = usage_dict
+    if "conversation_id" in chat_res:
+        response_payload["conversation_id"] = chat_res["conversation_id"]
+
+    return response_payload
+
+
+def dispatch_responses_stream(
+    messages: List[Any],
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
+    stream_options: Optional[Dict[str, Any]] = None,
+    conversation_id: Optional[str] = None,
+    **kwargs,
+) -> Generator[str, None, None]:
+    """
+    Stream responses in OpenAI Responses API SSE event format (`response.*` events),
+    consumed natively by Home Assistant (v2025/2026 Core and ha-openai-compatible)
+    and the latest OpenAI Python SDK (`client.responses.create(..., stream=True)`).
+    """
+    active_provider = resolve_provider(model=model, provider=provider)
+    effective_model = model or ("gemini-3.8-flash-high" if active_provider == "antigravity" else "gpt-4o-mini")
+    resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+    msg_item_id = f"msg_{uuid.uuid4().hex[:12]}"
+    created_ts = int(time.time())
+    seq = 0
+
+    # 1. response.created
+    resp_created_event = {
+        "type": "response.created",
+        "sequence_number": seq,
+        "response": {
+            "id": resp_id,
+            "object": "response",
+            "status": "in_progress",
+            "created_at": created_ts,
+            "model": effective_model,
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+    }
+    yield f"data: {json.dumps(resp_created_event)}\n\n"
+    seq += 1
+
+    # 2. response.output_item.added for initial message
+    msg_item_added = {
+        "type": "response.output_item.added",
+        "sequence_number": seq,
+        "output_index": 0,
+        "item": {
+            "id": msg_item_id,
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [],
+        },
+    }
+    yield f"data: {json.dumps(msg_item_added)}\n\n"
+    seq += 1
+
+    chat_stream_gen = dispatch_chat_stream(
+        messages=messages,
+        model=model,
+        provider=provider,
+        tools=tools,
+        tool_choice=tool_choice,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stop=stop,
+        stream_options=stream_options,
+        conversation_id=conversation_id,
+        **kwargs,
+    )
+
+    full_text: List[str] = []
+    output_items: List[Dict[str, Any]] = []
+    tc_states: Dict[int, Dict[str, Any]] = {}
+    output_index_counter = 1
+
+    for raw_chunk in chat_stream_gen:
+        if not raw_chunk or not raw_chunk.strip():
+            continue
+        line = raw_chunk.strip()
+        if line == "data: [DONE]":
+            break
+        if not line.startswith("data: "):
+            continue
+
+        data_json = line[6:].strip()
+        try:
+            chunk = json.loads(data_json)
+        except json.JSONDecodeError:
+            continue
+
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+
+        delta = choices[0].get("delta") or {}
+
+        # Content text delta
+        content_chunk = delta.get("content")
+        if content_chunk:
+            full_text.append(content_chunk)
+            text_delta_event = {
+                "type": "response.output_text.delta",
+                "sequence_number": seq,
+                "output_index": 0,
+                "content_index": 0,
+                "item_id": msg_item_id,
+                "delta": content_chunk,
+                "logprobs": [],
+            }
+            yield f"data: {json.dumps(text_delta_event)}\n\n"
+            seq += 1
+
+        # Tool calls delta
+        tool_calls = delta.get("tool_calls") or []
+        for tc in tool_calls:
+            tc_idx = tc.get("index", 0)
+            if tc_idx not in tc_states:
+                tc_states[tc_idx] = {
+                    "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                    "name": tc.get("function", {}).get("name", ""),
+                    "args": [],
+                    "output_index": output_index_counter,
+                    "added": False,
+                }
+                output_index_counter += 1
+
+            state = tc_states[tc_idx]
+            if tc.get("id"):
+                state["id"] = tc["id"]
+            if tc.get("function", {}).get("name"):
+                state["name"] = tc["function"]["name"]
+
+            if not state["added"]:
+                tc_added_event = {
+                    "type": "response.output_item.added",
+                    "sequence_number": seq,
+                    "output_index": state["output_index"],
+                    "item": {
+                        "type": "function_call",
+                        "id": state["id"],
+                        "call_id": state["id"],
+                        "name": state["name"],
+                        "arguments": "",
+                        "status": "in_progress",
+                    },
+                }
+                yield f"data: {json.dumps(tc_added_event)}\n\n"
+                seq += 1
+                state["added"] = True
+
+            arg_delta = tc.get("function", {}).get("arguments")
+            if arg_delta:
+                state["args"].append(arg_delta)
+                tc_arg_delta_event = {
+                    "type": "response.function_call_arguments.delta",
+                    "sequence_number": seq,
+                    "output_index": state["output_index"],
+                    "item_id": state["id"],
+                    "delta": arg_delta,
+                }
+                yield f"data: {json.dumps(tc_arg_delta_event)}\n\n"
+                seq += 1
+
+    # Finalize tool calls
+    for tc_idx, state in sorted(tc_states.items()):
+        full_args = "".join(state["args"])
+        tc_arg_done_event = {
+            "type": "response.function_call_arguments.done",
+            "sequence_number": seq,
+            "output_index": state["output_index"],
+            "item_id": state["id"],
+            "arguments": full_args,
+        }
+        yield f"data: {json.dumps(tc_arg_done_event)}\n\n"
+        seq += 1
+
+        tc_item = {
+            "type": "function_call",
+            "id": state["id"],
+            "call_id": state["id"],
+            "name": state["name"],
+            "arguments": full_args,
+            "status": "completed",
+        }
+        tc_done_event = {
+            "type": "response.output_item.done",
+            "sequence_number": seq,
+            "output_index": state["output_index"],
+            "item": tc_item,
+        }
+        yield f"data: {json.dumps(tc_done_event)}\n\n"
+        seq += 1
+        output_items.append(tc_item)
+
+    # Finalize message
+    full_str = "".join(full_text)
+    msg_item = {
+        "id": msg_item_id,
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{
+            "type": "output_text",
+            "text": full_str,
+            "annotations": [],
+        }],
+    }
+    msg_done_event = {
+        "type": "response.output_item.done",
+        "sequence_number": seq,
+        "output_index": 0,
+        "item": msg_item,
+    }
+    yield f"data: {json.dumps(msg_done_event)}\n\n"
+    seq += 1
+    if full_str or not output_items:
+        output_items.insert(0, msg_item)
+
+    # 5. response.completed
+    resp_completed_event = {
+        "type": "response.completed",
+        "sequence_number": seq,
+        "response": {
+            "id": resp_id,
+            "object": "response",
+            "status": "completed",
+            "created_at": created_ts,
+            "model": effective_model,
+            "output": output_items,
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+    }
+    yield f"data: {json.dumps(resp_completed_event)}\n\n"
+    seq += 1
+
+    yield "data: [DONE]\n\n"
