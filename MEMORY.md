@@ -18,15 +18,18 @@
   - Antigravity sessions are inherited from the host mount of `$HOME/.gemini`.
   - External clients (Home Assistant, n8n, Open WebUI, Continue.dev, curl, mobile apps) use internal Bearer tokens configured in `.env` (`API_KEYS`).
 - **Dual Consumption Modes**:
-  - *Asynchronous with Redis Queue (RQ)*: for long-running prompts or image analysis (`/ask`, `/ask-image`, `/result/{job_id}`).
-  - *Synchronous OpenAI-Compatible*: drop-in replacement for any client supporting custom base URLs (`/v1/chat/completions`).
+  - *Asynchronous with Redis Queue (RQ)*: for long-running batch prompts or image analysis (`/ask`, `/ask-image`, `/result/{job_id}`).
+  - *OpenAI-Compatible & Agent Harness Gateway*: drop-in replacement for OpenAI/Ollama clients and coding agents (Pi Coding Agent, Aider, Open WebUI, Continue.dev, LangChain, AutoGen) with:
+    - Real-time Server-Sent Events (SSE `stream: true`).
+    - Tool / Function Calling (`tools`, `tool_choice`, `tool_calls`).
+    - Multi-turn conversation support (`system`, `user`, `assistant`, `tool` roles).
+    - Standard model discovery (`GET /v1/models` and `GET /v1/models/{model_id}`).
 - **Production-Grade VPS Security**:
   - Caddy reverse proxy with automated TLS/HTTPS certificates (ports `80`/`443`).
-  - Internal application ports (`8000` for FastAPI, `6379` for Redis) isolated within the Docker `backend` network (preventing conflicts with Portainer or other services on `:8000`).
-  - Per-token rate limiting backed by Redis sliding minute buckets (`RATE_LIMIT_RPM`).
+  - Internal application ports (`8000` for FastAPI, `6379` for Redis) isolated within the Docker `backend` network.
+  - Per-token rate limiting backed by Redis sliding minute buckets (`RATE_LIMIT_RPM`) with fail-open resilience.
 - **100% Backward-Compatible Model Aliasing**:
-  - If a legacy client requests Copilot/OpenAI models (e.g. `gpt-4o-mini`, `gpt-4o`) while the active provider is `antigravity`, the worker transparently aliases the request to the default Antigravity model (`gemini-3.8-flash-high`) without breaking clients.
-  - The synchronous `/v1/chat/completions` endpoint polls for up to 180s to accommodate deep reasoning models.
+  - If a client requests Copilot/OpenAI models (e.g. `gpt-4o-mini`, `gpt-4o`) while the active provider is `antigravity`, the system transparently aliases the request to the default Antigravity model (`gemini-3.8-flash-high`) without breaking clients.
 
 ---
 
@@ -83,17 +86,19 @@
 
 | File | Role / Description |
 |---|---|
-| [`api.py`](api.py) | **FastAPI Application**: defines endpoints (`/ask`, `/result/{job_id}`, `/ask-image`, `/v1/chat/completions`, `/models`, `/health`), manages authentication, rate limiting, and request dispatching. |
-| [`tasks.py`](tasks.py) | **RQ Task Logic**: implements `dispatch_ask()`, `ask_antigravity()`, `ask_antigravity_vision()`, `ask_copilot()`, `ask_copilot_vision()`. Resolves models and invokes the appropriate backend. |
+| [`api.py`](api.py) | **FastAPI Application**: defines endpoints (`/v1/responses`, `/v1/chat/completions`, `/v1/models`, `/v1/antigravity/usage`, `/usage`, `/ask`, `/result/{job_id}`, `/ask-image`, `/health`), manages authentication, rate limiting, and request dispatching. |
+| [`tasks.py`](tasks.py) | **Task & Gateway Logic**: implements OpenAI Responses API adapter, Chat Completions streaming, prompt minification, conversation caching, Antigravity `agy` CLI subprocessing, and Copilot client dispatching. |
 | [`worker.py`](worker.py) | **RQ Worker Process**: polls Redis queues `copilot`, `antigravity`, and `default`, executing enqueued jobs. |
 | [`Caddyfile`](Caddyfile) | **Caddy Reverse Proxy Configuration**: binds domain `${DOMAIN}`, compression (`zstd`, `gzip`), proxies to `api:8000`, and adds HTTP security headers. |
 | [`docker-compose.yml`](docker-compose.yml) | **Container Orchestration**: 4 services (`caddy`, `redis`, `api`, `worker`), volume mounts for host authentication (`$HOME/.config/gh` and `$HOME/.gemini`), isolated `backend` network. |
 | [`Dockerfile`](Dockerfile) | **Docker Image (Python 3.11-slim)**: installs `gh` CLI, adds `/root/.gemini/bin` to `PATH`, installs `requirements.txt`, and configures `entrypoint.sh`. |
 | [`entrypoint.sh`](entrypoint.sh) | **Container Entrypoint**: validates `gh auth token` for Copilot and detects the `agy` binary for Antigravity. |
+| [`tests/`](tests/) | **Automated Test Suite**: unit tests for provider routing, Responses API converters, and auth helpers. |
 | [`requirements.txt`](requirements.txt) | **Python Dependencies**: `fastapi`, `uvicorn[standard]`, `redis`, `rq`, `openai`, `python-multipart`. |
 | [`.env.example`](.env.example) | Configuration template for provider settings, default models, security keys, domains, and rate limits. |
 | [`.env`](.env) | Instance environment configuration (git-ignored). |
 | [`README.md`](README.md) | Complete user and developer documentation for quickstart, usage, and client integration. |
+| [`LICENSE`](LICENSE) | Standard MIT License. |
 
 ---
 
