@@ -1,4 +1,4 @@
-# cli2api-ai
+# cli2api-llm-gate
 
 > **Transform Host CLI AI Tools (Google Antigravity & GitHub Copilot) into a Multi-Provider, OpenAI-Compatible HTTP Gateway.**
 
@@ -68,8 +68,8 @@ Public traffic reaches only Caddy (ports 80 and 443). FastAPI and Redis stay int
 ### 2. Setup and Launch
 
 ```bash
-git clone https://github.com/metagliatore/copilot-api.git cli2api-ai
-cd cli2api-ai
+git clone https://github.com/metagliatore/copilot-api.git cli2api-llm-gate
+cd cli2api-llm-gate
 
 # Create your .env from template
 cp .env.example .env
@@ -107,12 +107,12 @@ Use the custom integration [`ha-openai-compatible`](https://github.com/adamjs83/
 
 ### 2. Pi Coding Agent / Coding Harnesses
 
-Configure `cli2api-ai` as a custom OpenAI provider in your coding agent (`~/.pi/agent/models.json` or equivalent):
+Configure `cli2api-llm-gate` as a custom OpenAI provider in your coding agent (`~/.pi/agent/models.json` or equivalent):
 
 ```json
 {
   "providers": {
-    "cli2api": {
+    "cli2api_llm_gate": {
       "type": "openai",
       "baseUrl": "https://api.your-domain.com/v1",
       "apiKey": "your_secret_api_key",

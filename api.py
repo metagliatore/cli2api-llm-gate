@@ -34,7 +34,7 @@ PUBLIC_HEALTH = os.getenv("PUBLIC_HEALTH", "true").lower() == "true"
 DEFAULT_PROVIDER = os.getenv("PROVIDER", "copilot").lower()
 
 app = FastAPI(
-    title="cli2api-ai – Multi-Provider AI HTTP API (Copilot & Antigravity)",
+    title="cli2api-llm-gate – Multi-Provider AI HTTP API (Copilot & Antigravity)",
     version="2.2.0",
     description="OpenAI-compatible and asynchronous API for GitHub Copilot / Models and Google Antigravity.",
 )
@@ -190,7 +190,7 @@ def get_v1_model(model_id: str, _: None = Depends(auth_and_rate_limit)):
         "id": model_id,
         "object": "model",
         "created": int(time.time()),
-        "owned_by": "cli2api-ai",
+        "owned_by": "cli2api-llm-gate",
         "permission": [],
         "root": model_id,
         "parent": None,

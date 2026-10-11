@@ -1,4 +1,4 @@
-name: cli2api-ai
+name: cli2api-llm-gate
 
 # ── Shared environment ──────────────────────────────────────────────────────
 # Auth is injected automatically:

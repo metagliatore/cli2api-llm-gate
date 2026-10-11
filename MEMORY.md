@@ -1,4 +1,4 @@
-# Project: cli2api-ai (Multi-Provider AI HTTP Gateway)
+# Project: cli2api-llm-gate (Multi-Provider AI HTTP Gateway)
 **Project Architecture & Technical Memory (MEMORY.md)**  
 *Last updated: October 2026*  
 *Supported Providers: Google Antigravity (`agy`) and GitHub Copilot / GitHub Models*
@@ -7,7 +7,7 @@
 
 ## 1. Project Overview
 
-**cli2api-ai** is a production-ready containerized microservice that exposes AI models from **Google Antigravity (`agy`)** and **GitHub Copilot / GitHub Models** via a unified, RESTful, and OpenAI-compatible HTTP API (`/v1/chat/completions`).
+**cli2api-llm-gate** is a production-ready containerized microservice that exposes AI models from **Google Antigravity (`agy`)** and **GitHub Copilot / GitHub Models** via a unified, RESTful, and OpenAI-compatible HTTP API (`/v1/chat/completions`).
 
 ### Key Goals & Features
 - **Multi-Provider Architecture**:
