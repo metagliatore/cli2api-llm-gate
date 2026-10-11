@@ -35,7 +35,7 @@ DEFAULT_PROVIDER = os.getenv("PROVIDER", "copilot").lower()
 
 app = FastAPI(
     title="cli2api-llm-gate – Multi-Provider AI HTTP API (Copilot & Antigravity)",
-    version="2.2.0",
+    version="1.0.0",
     description="OpenAI-compatible and asynchronous API for GitHub Copilot / Models and Google Antigravity.",
 )
 

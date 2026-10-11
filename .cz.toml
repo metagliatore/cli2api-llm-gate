@@ -5,7 +5,7 @@ version_scheme = "semver"
 version_provider = "commitizen"
 update_changelog_on_bump = true
 major_version_zero = false
-version = "2.2.0"
+version = "1.0.0"
 version_files = [
     "api.py:version=\"[0-9.]+\"",
 ]
