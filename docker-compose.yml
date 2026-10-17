@@ -72,8 +72,8 @@ services:
     environment:
       <<: *common-env
     volumes:
-      - "${GH_CONFIG_DIR:-$HOME/.config/gh}:/gh-config-ro:ro"
-      - "${GEMINI_DIR:-$HOME/.gemini}:/root/.gemini"
+      - "${GH_CONFIG_DIR:-${HOME:-/root}/.config/gh}:/gh-config-ro:ro"
+      - "${GEMINI_DIR:-${HOME:-/root}/.gemini}:/root/.gemini"
       - files_data:/data/uploads
     depends_on:
       redis:
@@ -92,8 +92,8 @@ services:
     environment:
       <<: *common-env
     volumes:
-      - "${GH_CONFIG_DIR:-$HOME/.config/gh}:/gh-config-ro:ro"
-      - "${GEMINI_DIR:-$HOME/.gemini}:/root/.gemini"
+      - "${GH_CONFIG_DIR:-${HOME:-/root}/.config/gh}:/gh-config-ro:ro"
+      - "${GEMINI_DIR:-${HOME:-/root}/.gemini}:/root/.gemini"
       - files_data:/data/uploads
     depends_on:
       redis:
