@@ -40,7 +40,7 @@ services:
     environment:
       DOMAIN: ${DOMAIN:-localhost}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${CADDYFILE_PATH:-./Caddyfile}:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
@@ -63,6 +63,7 @@ services:
 
   # ── FastAPI ────────────────────────────────────────────────────────────
   api:
+    image: cli2api-llm-gate-api:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -82,6 +83,7 @@ services:
 
   # ── RQ Worker ──────────────────────────────────────────────────────────
   worker:
+    image: cli2api-llm-gate-worker:latest
     build:
       context: .
       dockerfile: Dockerfile
