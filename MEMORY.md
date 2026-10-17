@@ -28,6 +28,13 @@
   - Caddy reverse proxy with automated TLS/HTTPS certificates (ports `80`/`443`).
   - Internal application ports (`8000` for FastAPI, `6379` for Redis) isolated within the Docker `backend` network.
   - Per-token rate limiting backed by Redis sliding minute buckets (`RATE_LIMIT_RPM`) with fail-open resilience.
+- **OpenAI Files API & Multimodal Vision**:
+  - Full OpenAI-compatible `/v1/files` CRUD implementation (`files_store.py`) backed by shared volume storage (`files_data:/data/uploads`) and Redis metadata cache with filesystem fallback.
+  - Native image analysis and document/scan analysis with zero external parsing dependencies.
+  - Multi-provider multimodal resolution:
+    - `antigravity`: local files and decoded data URLs are mounted into `agy` workspace via `--add-dir`, providing Gemini with direct native access to PDF documents, scans, and images without intermediate parsing.
+    - `copilot`: images are converted into standard `image_url` vision parts. Text files are injected into prompt context.
+    - Full support in `/v1/chat/completions` (via `attachments`, `file_ids`, or inline `content` items) and in `/v1/responses` (via `input_file`).
 - **100% Backward-Compatible Model Aliasing**:
   - If a client requests Copilot/OpenAI models (e.g. `gpt-4o-mini`, `gpt-4o`) while the active provider is `antigravity`, the system transparently aliases the request to the default Antigravity model (`gemini-3.8-flash-high`) without breaking clients.
 

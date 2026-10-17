@@ -174,7 +174,10 @@ print(response.output[0].content[0].text)
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
 | `/v1/responses` | `POST` | Bearer / Header | **OpenAI Responses API** (Home Assistant Assist & modern agents, SSE streaming & tools) |
-| `/v1/chat/completions` | `POST` | Bearer / Header | **OpenAI Chat Completions** (streaming, multi-turn, tool calling) |
+| `/v1/chat/completions` | `POST` | Bearer / Header | **OpenAI Chat Completions** (streaming, multi-turn, tool calling, vision & files) |
+| `/v1/files` | `POST`, `GET` | Bearer / Header | **OpenAI Files API** (upload scans, images, documents; list files) |
+| `/v1/files/{file_id}` | `GET`, `DELETE` | Bearer / Header | Retrieve file metadata or delete file |
+| `/v1/files/{file_id}/content` | `GET` | Bearer / Header | Download raw uploaded file content |
 | `/v1/models` | `GET` | Bearer / Header | Standard OpenAI model listing |
 | `/v1/models/{model_id}` | `GET` | Bearer / Header | Model metadata retrieval |
 | `/v1/antigravity/usage` | `GET` | Bearer / Header / Query | Antigravity quota status, daily breakdown & active sessions |
@@ -224,6 +227,81 @@ curl -N -X POST "https://$DOMAIN/v1/chat/completions" \
     "stream": true
   }'
 ```
+
+---
+
+### 📂 `POST /v1/files` (OpenAI Files API & Multimodal Scans)
+
+Full implementation of the OpenAI Files standard for **image analysis** and **scanned document analysis (PDFs & multi-page scans)**.
+
+#### 1. Upload a File, Scan, or Image
+
+```bash
+curl -X POST "https://$DOMAIN/v1/files" \
+  -H "Authorization: Bearer $API_KEY" \
+  -F "file=@scanned_invoice.pdf" \
+  -F "purpose=assistants"
+```
+
+Response:
+```json
+{
+  "id": "file-4c91d09e598f4803",
+  "object": "file",
+  "bytes": 245100,
+  "created_at": 1729178900,
+  "filename": "scanned_invoice.pdf",
+  "purpose": "assistants",
+  "status": "processed",
+  "status_details": null
+}
+```
+
+#### 2. Analyze the Uploaded File in Chat Completions
+
+Reference the file via `attachments` or `file_ids`:
+
+```bash
+curl -N -X POST "https://$DOMAIN/v1/chat/completions" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.8-flash-high",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Estrai numero fattura, data, fornitore e importo da questo documento scansionato:",
+        "attachments": [{"file_id": "file-4c91d09e598f4803"}]
+      }
+    ]
+  }'
+```
+
+#### 3. Direct Inline Multimodal Vision (Base64)
+
+Directly pass base64 image or PDF data URLs in standard OpenAI format:
+
+```bash
+curl -N -X POST "https://$DOMAIN/v1/chat/completions" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.8-flash-high",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Cosa c'\''è in questa scansione?"},
+          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,...base64_data..."}}
+        ]
+      }
+    ]
+  }'
+```
+
+#### Multi-Provider Multimodal Handling
+* **Google Antigravity (`agy` / Gemini)**: Files uploaded or passed as data URLs are stored in the persistent volume and made accessible to `agy` with `--add-dir`. Gemini natively inspects local PDFs, scans, and images directly!
+* **GitHub Copilot / Models**: Images are forwarded directly as standard OpenAI vision `image_url` data URLs. Text files are injected into prompt context.
 
 ---
 

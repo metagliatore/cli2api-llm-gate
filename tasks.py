@@ -22,7 +22,13 @@ import tempfile
 import logging
 import sqlite3
 import subprocess
-from typing import Optional, Union, List, Dict, Any, Generator
+from typing import Optional, Union, List, Dict, Any, Generator, Tuple
+
+from files_store import (
+    extract_file_for_ai,
+    save_data_url_to_temp_file,
+    get_file,
+)
 
 try:
     from openai import OpenAI
@@ -347,28 +353,115 @@ def resolve_provider(model: str | None = None, provider: str | None = None) -> s
     return os.getenv("PROVIDER", "copilot").lower()
 
 
+def extract_content_and_files_for_antigravity(
+    content: Any,
+    attachments: Optional[List[Any]] = None,
+    file_ids: Optional[List[str]] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Extract text content, inline images/data-URLs, and attached files for an Antigravity turn.
+    Resolves file_ids, attachments, and inline base64 data URLs.
+    Returns (formatted_text, list_of_attached_files).
+    """
+    parts = []
+    attached_files: List[Dict[str, Any]] = []
+
+    # 1. Attachments & file_ids
+    all_fids: List[str] = []
+    if attachments:
+        for att in attachments:
+            if isinstance(att, dict) and att.get("file_id"):
+                all_fids.append(att["file_id"])
+            elif isinstance(att, str):
+                all_fids.append(att)
+    if file_ids:
+        for fid in file_ids:
+            if isinstance(fid, str):
+                all_fids.append(fid)
+
+    for fid in all_fids:
+        info = extract_file_for_ai(fid)
+        if "error" in info:
+            parts.append(f"[File Error: {fid} - {info['error']}]")
+            continue
+        attached_files.append(info)
+        f_path = info.get("path", "")
+        f_name = info.get("filename", "file")
+        if info.get("is_image"):
+            parts.append(f"[Attached Image: {f_path} ({f_name})]")
+        elif info.get("is_pdf"):
+            parts.append(f"[Attached Document: {f_path} ({f_name})]")
+        elif info.get("is_text"):
+            parts.append(f"[Attached File: {f_path} ({f_name})]\n{info.get('text', '')}")
+        else:
+            parts.append(f"[Attached File: {f_path} ({f_name})]")
+
+    # 2. Content parts
+    if content is not None:
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    p_type = item.get("type")
+                    if p_type in ("text", "input_text"):
+                        parts.append(item.get("text", ""))
+                    elif p_type in ("image_file", "file", "file_id", "input_file"):
+                        fid = (
+                            item.get("file_id")
+                            or item.get("id")
+                            or item.get("file", {}).get("file_id")
+                            or item.get("image_file", {}).get("file_id")
+                        )
+                        if fid:
+                            info = extract_file_for_ai(fid)
+                            if "error" in info:
+                                parts.append(f"[File Error: {fid} - {info['error']}]")
+                                continue
+                            attached_files.append(info)
+                            f_path = info.get("path", "")
+                            f_name = info.get("filename", "file")
+                            if info.get("is_image"):
+                                parts.append(f"[Attached Image: {f_path} ({f_name})]")
+                            elif info.get("is_pdf"):
+                                parts.append(f"[Attached Document: {f_path} ({f_name})]")
+                            elif info.get("is_text"):
+                                parts.append(f"[Attached File: {f_path} ({f_name})]\n{info.get('text', '')}")
+                            else:
+                                parts.append(f"[Attached File: {f_path} ({f_name})]")
+                    elif p_type in ("image_url", "input_image"):
+                        img_val = item.get("image_url") or item.get("url") or item.get("image")
+                        url = img_val.get("url", "") if isinstance(img_val, dict) else str(img_val or "")
+                        if url.startswith("data:"):
+                            temp_res = save_data_url_to_temp_file(url, "inline_attachment")
+                            if temp_res:
+                                temp_path, mime = temp_res
+                                attached_files.append({
+                                    "path": temp_path,
+                                    "filename": os.path.basename(temp_path),
+                                    "mime_type": mime,
+                                })
+                                if "pdf" in mime:
+                                    parts.append(f"[Attached Document: {temp_path}]")
+                                else:
+                                    parts.append(f"[Attached Image: {temp_path}]")
+                            else:
+                                parts.append("[Image attached]")
+                        elif url:
+                            parts.append(f"[Image URL: {url}]")
+                    else:
+                        if "text" in item:
+                            parts.append(item["text"])
+
+    return "\n".join(parts), attached_files
+
+
 def extract_text_from_content(content: Any) -> str:
     """Extract plain text string from string or multimodal content structure."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                if item.get("type") == "text":
-                    parts.append(item.get("text", ""))
-                elif item.get("type") == "image_url":
-                    url = item.get("image_url", {}).get("url", "")
-                    if url.startswith("data:"):
-                        parts.append("[Image attached]")
-                    else:
-                        parts.append(f"[Image URL: {url}]")
-            elif isinstance(item, str):
-                parts.append(item)
-        return "\n".join(parts)
-    return str(content)
+    text, _ = extract_content_and_files_for_antigravity(content)
+    return text
 
 
 def format_messages_for_antigravity(
@@ -376,11 +469,13 @@ def format_messages_for_antigravity(
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[Any] = None,
     incremental: bool = False,
-) -> str:
+    return_attached_dirs: bool = False,
+) -> Union[str, Tuple[str, List[str]]]:
     """
     Format chat messages and optional tool specifications into an optimized prompt for agy.
     If incremental=True, only the latest turns since the last assistant message are sent,
     saving thousands of prompt tokens when resuming an active Antigravity conversation.
+    Resolves attached images, scans, and PDFs into local file paths and instructions.
     """
     target_messages = messages
     if incremental and len(messages) > 1:
@@ -396,22 +491,31 @@ def format_messages_for_antigravity(
 
     system_prompts: List[str] = []
     conversation_turns: List[str] = []
+    all_attached_files: List[Dict[str, Any]] = []
 
     for msg in target_messages:
         if isinstance(msg, dict):
             role = msg.get("role", "user")
             content = msg.get("content")
+            attachments = msg.get("attachments")
+            file_ids = msg.get("file_ids")
             tool_calls = msg.get("tool_calls")
             tool_call_id = msg.get("tool_call_id")
             name = msg.get("name")
         else:
             role = getattr(msg, "role", "user")
             content = getattr(msg, "content", None)
+            attachments = getattr(msg, "attachments", None)
+            file_ids = getattr(msg, "file_ids", None)
             tool_calls = getattr(msg, "tool_calls", None)
             tool_call_id = getattr(msg, "tool_call_id", None)
             name = getattr(msg, "name", None)
 
-        text = extract_text_from_content(content)
+        text, msg_files = extract_content_and_files_for_antigravity(
+            content=content, attachments=attachments, file_ids=file_ids
+        )
+        if msg_files:
+            all_attached_files.extend(msg_files)
 
         if role in ("system", "developer"):
             # When incremental, system instructions are already stored in the conversation session
@@ -435,6 +539,22 @@ def format_messages_for_antigravity(
     prompt_sections: List[str] = []
     if system_prompts:
         prompt_sections.append("[System Instructions]\n" + "\n\n".join(system_prompts))
+
+    if all_attached_files:
+        file_lines = []
+        for f in all_attached_files:
+            p = f.get("path")
+            fn = f.get("filename", os.path.basename(p or ""))
+            if p:
+                file_lines.append(f"- {p} ({fn})")
+        if file_lines:
+            files_section = (
+                "[Attached Files & Scans to Analyze]\n"
+                "The following local file(s) are attached to this conversation:\n"
+                + "\n".join(file_lines) + "\n"
+                "Please examine and analyze these files directly to answer the user's questions."
+            )
+            prompt_sections.append(files_section)
 
     if tools and tool_choice != "none":
         # Minify tool specifications to eliminate whitespace token bloat
@@ -461,7 +581,17 @@ def format_messages_for_antigravity(
         prompt_sections.append("[Conversation]\n" + "\n\n".join(conversation_turns))
 
     prompt_sections.append("Assistant:")
-    return "\n\n".join(prompt_sections)
+    final_prompt = "\n\n".join(prompt_sections)
+
+    if return_attached_dirs:
+        dirs = list({
+            os.path.dirname(f["path"])
+            for f in all_attached_files
+            if f.get("path") and os.path.exists(os.path.dirname(f["path"]))
+        })
+        return final_prompt, dirs
+
+    return final_prompt
 
 
 def parse_tool_calls_from_text(text: str) -> tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
@@ -522,7 +652,11 @@ def parse_tool_calls_from_text(text: str) -> tuple[Optional[str], Optional[List[
 
 
 def prepare_messages_for_openai(messages: List[Any]) -> List[Dict[str, Any]]:
-    """Clean and prepare message dicts for the official OpenAI client."""
+    """
+    Clean, prepare, and resolve multimodal file attachments / data URLs for OpenAI client.
+    Converts image files and scanned PDF page images to standard OpenAI vision parts (image_url),
+    and injects extracted text from PDFs and text files.
+    """
     prepared = []
     for msg in messages:
         if hasattr(msg, "model_dump"):
@@ -534,6 +668,83 @@ def prepare_messages_for_openai(messages: List[Any]) -> List[Dict[str, Any]]:
                 "role": getattr(msg, "role", "user"),
                 "content": getattr(msg, "content", ""),
             }
+
+        # Check for message attachments or file_ids
+        attachments = d.pop("attachments", None) or []
+        file_ids = d.pop("file_ids", None) or []
+        all_file_ids = []
+        for att in attachments:
+            if isinstance(att, dict) and att.get("file_id"):
+                all_file_ids.append(att["file_id"])
+            elif isinstance(att, str):
+                all_file_ids.append(att)
+        for fid in file_ids:
+            if isinstance(fid, str):
+                all_file_ids.append(fid)
+
+        content = d.get("content")
+        new_content_parts: List[Dict[str, Any]] = []
+
+        # 1. Process files from attachments/file_ids
+        for fid in all_file_ids:
+            finfo = extract_file_for_ai(fid)
+            if "error" in finfo:
+                new_content_parts.append({"type": "text", "text": f"[Error loading file {fid}: {finfo['error']}]"})
+                continue
+            if finfo.get("is_image"):
+                new_content_parts.append({"type": "image_url", "image_url": {"url": finfo["data_url"]}})
+            elif finfo.get("is_text"):
+                new_content_parts.append({
+                    "type": "text",
+                    "text": f"[Attached File: {finfo['filename']}]\n{finfo.get('text', '')}",
+                })
+            else:
+                new_content_parts.append({
+                    "type": "text",
+                    "text": f"[Attached File: {finfo['filename']}]",
+                })
+
+        # 2. Process content
+        if isinstance(content, str):
+            if new_content_parts:
+                new_content_parts.insert(0, {"type": "text", "text": content})
+                d["content"] = new_content_parts
+            else:
+                d["content"] = content
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, str):
+                    new_content_parts.append({"type": "text", "text": part})
+                elif isinstance(part, dict):
+                    p_type = part.get("type")
+                    if p_type in ("image_file", "file", "file_id", "input_file"):
+                        fid = (
+                            part.get("file_id")
+                            or part.get("id")
+                            or part.get("file", {}).get("file_id")
+                            or part.get("image_file", {}).get("file_id")
+                        )
+                        if fid:
+                            finfo = extract_file_for_ai(fid)
+                            if "error" in finfo:
+                                new_content_parts.append({"type": "text", "text": f"[Error loading file {fid}: {finfo['error']}]"})
+                                continue
+                            if finfo.get("is_image"):
+                                new_content_parts.append({"type": "image_url", "image_url": {"url": finfo["data_url"]}})
+                            elif finfo.get("is_text"):
+                                new_content_parts.append({
+                                    "type": "text",
+                                    "text": f"[Attached File: {finfo['filename']}]\n{finfo.get('text', '')}",
+                                })
+                            else:
+                                new_content_parts.append({
+                                    "type": "text",
+                                    "text": f"[Attached File: {finfo['filename']}]",
+                                })
+                    else:
+                        new_content_parts.append(part)
+            d["content"] = new_content_parts
+
         prepared.append(d)
     return prepared
 
@@ -911,9 +1122,14 @@ def chat_complete_antigravity(
 ) -> Dict[str, Any]:
     """Execute OpenAI-compatible chat completion using Antigravity."""
     incremental = bool(conversation_id and _conversation_exists_in_agy(conversation_id))
-    prompt = format_messages_for_antigravity(
-        messages, tools=tools, tool_choice=tool_choice, incremental=incremental
+    prompt_res = format_messages_for_antigravity(
+        messages, tools=tools, tool_choice=tool_choice, incremental=incremental, return_attached_dirs=True
     )
+    if isinstance(prompt_res, tuple):
+        prompt, attached_dirs = prompt_res
+    else:
+        prompt, attached_dirs = prompt_res, []
+
     agy_bin = _find_agy_bin()
     default_model = os.getenv("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
     chosen_model = model if (model and is_antigravity_model(model)) else default_model
@@ -927,6 +1143,8 @@ def chat_complete_antigravity(
         "--dangerously-skip-permissions",
         "--disable-slash-commands",
     ]
+    for ad in attached_dirs:
+        cmd.extend(["--add-dir", ad])
     if chosen_effort:
         cmd.extend(["--effort", chosen_effort])
     if conversation_id:
@@ -1021,9 +1239,14 @@ def chat_stream_antigravity(
 ) -> Generator[str, None, None]:
     """Stream chat completions from Antigravity as Server-Sent Events with abort safety and session reuse."""
     incremental = bool(conversation_id and _conversation_exists_in_agy(conversation_id))
-    prompt = format_messages_for_antigravity(
-        messages, tools=tools, tool_choice=tool_choice, incremental=incremental
+    prompt_res = format_messages_for_antigravity(
+        messages, tools=tools, tool_choice=tool_choice, incremental=incremental, return_attached_dirs=True
     )
+    if isinstance(prompt_res, tuple):
+        prompt, attached_dirs = prompt_res
+    else:
+        prompt, attached_dirs = prompt_res, []
+
     agy_bin = _find_agy_bin()
     default_model = os.getenv("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
     chosen_model = model if (model and is_antigravity_model(model)) else default_model
@@ -1037,6 +1260,8 @@ def chat_stream_antigravity(
         "--dangerously-skip-permissions",
         "--disable-slash-commands",
     ]
+    for ad in attached_dirs:
+        cmd.extend(["--add-dir", ad])
     if chosen_effort:
         cmd.extend(["--effort", chosen_effort])
     if conversation_id:
@@ -1558,6 +1783,15 @@ def convert_responses_input_to_messages(
                             standard_parts.append({"type": "image_url", "image_url": {"url": img_url}})
                         elif "image" in part:
                             standard_parts.append({"type": "image_url", "image_url": {"url": part["image"]}})
+                    elif p_type in ("input_file", "file", "file_id", "image_file"):
+                        fid = (
+                            part.get("file_id")
+                            or part.get("id")
+                            or (part.get("file", {}).get("file_id") if isinstance(part.get("file"), dict) else None)
+                            or (part.get("image_file", {}).get("file_id") if isinstance(part.get("image_file"), dict) else None)
+                        )
+                        if fid:
+                            standard_parts.append({"type": "file", "file_id": str(fid)})
                     else:
                         if "text" in part:
                             text_parts.append(part["text"])
@@ -1569,6 +1803,10 @@ def convert_responses_input_to_messages(
                 content = standard_parts
 
         msg_obj: Dict[str, Any] = {"role": role, "content": content}
+        if item.get("attachments"):
+            msg_obj["attachments"] = item["attachments"]
+        if item.get("file_ids"):
+            msg_obj["file_ids"] = item["file_ids"]
         if item.get("name"):
             msg_obj["name"] = item["name"]
         if item.get("tool_calls"):

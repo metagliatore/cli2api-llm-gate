@@ -26,6 +26,9 @@ x-common-env: &common-env
   # Default model (can be overridden per request via ?model= query param)
   COPILOT_MODEL: ${COPILOT_MODEL:-gpt-4o-mini}
 
+  # ── Storage options ──
+  FILES_DIR: ${FILES_DIR:-/data/uploads}
+
 services:
   # ── Reverse proxy (TLS termination) ────────────────────────────────────
   caddy:
@@ -70,6 +73,7 @@ services:
     volumes:
       - "${GH_CONFIG_DIR:-$HOME/.config/gh}:/gh-config-ro:ro"
       - "${GEMINI_DIR:-$HOME/.gemini}:/root/.gemini"
+      - files_data:/data/uploads
     depends_on:
       redis:
         condition: service_healthy
@@ -88,6 +92,7 @@ services:
     volumes:
       - "${GH_CONFIG_DIR:-$HOME/.config/gh}:/gh-config-ro:ro"
       - "${GEMINI_DIR:-$HOME/.gemini}:/root/.gemini"
+      - files_data:/data/uploads
     depends_on:
       redis:
         condition: service_healthy
@@ -97,6 +102,7 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  files_data:
 
 networks:
   backend:

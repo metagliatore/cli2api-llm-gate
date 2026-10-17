@@ -4,11 +4,19 @@ import time
 import hashlib
 from typing import Optional, Union, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query, Body, UploadFile, File, Form, Depends, Header, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, ConfigDict
 from redis import Redis
 from rq import Queue
 from rq.job import Job, NoSuchJobError
+
+from files_store import (
+    save_file,
+    get_file,
+    list_files,
+    delete_file,
+    get_file_metadata,
+)
 
 from tasks import (
     dispatch_ask,
@@ -247,6 +255,88 @@ def antigravity_usage(_: None = Depends(auth_and_rate_limit)):
     return get_antigravity_usage_stats()
 
 
+# ── OpenAI Files API (/v1/files) ─────────────────────────────────────────────
+# Standard file upload and management for multimodal models, image analysis, and scanned documents.
+
+@app.post("/v1/files")
+@app.post("/files")
+async def upload_file(
+    file: UploadFile = File(..., description="The File object to be uploaded."),
+    purpose: str = Form("assistants", description="The intended purpose of the uploaded file."),
+    _: None = Depends(auth_and_rate_limit),
+):
+    """
+    OpenAI-compatible file upload endpoint (/v1/files).
+    Upload scanned documents (PDF), images (JPEG, PNG, WEBP), or text/data files.
+    """
+    raw_content = await file.read()
+    if len(raw_content) > 50 * 1024 * 1024:  # 50 MB
+        raise HTTPException(status_code=413, detail="File exceeds 50 MB limit")
+
+    file_meta = save_file(
+        content=raw_content,
+        filename=file.filename or "file",
+        purpose=purpose,
+        mime_type=file.content_type,
+    )
+    return file_meta
+
+
+@app.get("/v1/files")
+@app.get("/files")
+def list_uploaded_files(
+    purpose: Optional[str] = Query(None, description="Only return files with the given purpose."),
+    _: None = Depends(auth_and_rate_limit),
+):
+    """List all uploaded files according to OpenAI format."""
+    files = list_files(purpose=purpose)
+    return {"object": "list", "data": files}
+
+
+@app.get("/v1/files/{file_id}")
+@app.get("/files/{file_id}")
+def retrieve_file(
+    file_id: str,
+    _: None = Depends(auth_and_rate_limit),
+):
+    """Retrieve metadata for a specific uploaded file."""
+    f = get_file(file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail=f"No such file: '{file_id}'")
+    return f
+
+
+@app.get("/v1/files/{file_id}/content")
+@app.get("/files/{file_id}/content")
+def retrieve_file_content(
+    file_id: str,
+    _: None = Depends(auth_and_rate_limit),
+):
+    """Retrieve raw content/bytes of a specific uploaded file."""
+    meta = get_file_metadata(file_id)
+    if not meta or not meta.get("path") or not os.path.exists(meta["path"]):
+        raise HTTPException(status_code=404, detail=f"No such file: '{file_id}'")
+
+    return FileResponse(
+        path=meta["path"],
+        filename=meta.get("filename", "file"),
+        media_type=meta.get("mime_type", "application/octet-stream"),
+    )
+
+
+@app.delete("/v1/files/{file_id}")
+@app.delete("/files/{file_id}")
+def delete_uploaded_file(
+    file_id: str,
+    _: None = Depends(auth_and_rate_limit),
+):
+    """Delete a specific file from storage."""
+    success = delete_file(file_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"No such file: '{file_id}'")
+    return {"id": file_id, "object": "file", "deleted": True}
+
+
 # ── Vision Endpoint ──────────────────────────────────────────────────────────
 
 SUPPORTED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -312,6 +402,8 @@ class ChatMessage(BaseModel):
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
+    attachments: Optional[List[Dict[str, Any]]] = None
+    file_ids: Optional[List[str]] = None
 
 
 class ChatRequest(BaseModel):
@@ -333,6 +425,8 @@ class ChatRequest(BaseModel):
     provider: Optional[str] = None
     user: Optional[str] = None
     conversation_id: Optional[str] = None
+    attachments: Optional[List[Dict[str, Any]]] = None
+    file_ids: Optional[List[str]] = None
 
 
 @app.post("/v1/chat/completions")
@@ -351,6 +445,16 @@ def chat_completions(
     """
     if not body.messages:
         raise HTTPException(status_code=400, detail="messages list must not be empty")
+
+    # Propagate request-level attachments or file_ids to the latest user message
+    if body.attachments or body.file_ids:
+        for m in reversed(body.messages):
+            if m.role == "user":
+                if body.attachments:
+                    m.attachments = (m.attachments or []) + body.attachments
+                if body.file_ids:
+                    m.file_ids = (m.file_ids or []) + body.file_ids
+                break
 
     effective_max_tokens = body.max_tokens or body.max_completion_tokens
     conv_id = (
