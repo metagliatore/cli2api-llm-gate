@@ -1,0 +1,66 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# AI HTTP API (GitHub Copilot & Google Antigravity) - Standalone Image
+#
+# Fully self-contained image that pre-installs both:
+#   - GitHub CLI (`gh`)
+#   - Google Antigravity CLI (`agy`) downloaded from official manifest
+#
+# Authentication options:
+#   - Copilot: set GITHUB_TOKEN in .env (or mount ~/.config/gh)
+#   - Antigravity: persist auth via named volume (gemini_data:/root/.gemini)
+#     or mount existing host session (~/.gemini:/root/.gemini)
+# ──────────────────────────────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+# ----- System dependencies + GitHub CLI + utilities -----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        tar \
+        jq \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# ----- Download and install Google Antigravity CLI (agy) -----
+ARG TARGETARCH
+RUN ARCH="${TARGETARCH:-amd64}" \
+    && case "$ARCH" in \
+        amd64|x86_64) MANIFEST_ARCH="amd64" ;; \
+        arm64|aarch64) MANIFEST_ARCH="arm64" ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac \
+    && MANIFEST_URL="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_${MANIFEST_ARCH}.json" \
+    && echo "Fetching Antigravity manifest from ${MANIFEST_URL}..." \
+    && TAR_URL=$(curl -fsSL "${MANIFEST_URL}" | jq -r '.url') \
+    && echo "Downloading Antigravity CLI from ${TAR_URL}..." \
+    && mkdir -p /opt/antigravity/bin /root/.gemini/bin \
+    && curl -fsSL "${TAR_URL}" | tar -xz -C /opt/antigravity/bin \
+    && if [ -f /opt/antigravity/bin/antigravity ] && [ ! -f /opt/antigravity/bin/agy ]; then \
+        ln -s /opt/antigravity/bin/antigravity /opt/antigravity/bin/agy; \
+    fi \
+    && chmod +x /opt/antigravity/bin/* \
+    && ln -s /opt/antigravity/bin/agy /usr/local/bin/agy \
+    && ln -s /opt/antigravity/bin/agy /root/.gemini/bin/agy
+
+ENV PATH="/opt/antigravity/bin:/root/.gemini/bin:${PATH}"
+
+# ----- Python dependencies -----
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ----- Application code -----
+COPY . .
+
+# ----- Entrypoint -----
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Default command
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]

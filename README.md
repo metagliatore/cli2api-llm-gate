@@ -78,14 +78,24 @@ cp .env.example .env
 # PROVIDER=antigravity      # or 'copilot'
 # API_KEYS=token_ha,token_pi_agent,token_mobile
 # DOMAIN=api.your-domain.com
-
-# Start the stack
-docker compose up -d --build
 ```
 
-The stack automatically mounts:
+#### Option A: Standard / Lightweight (Recommended)
+Uses the lightweight default image (~300 MB). It connects seamlessly to the CLI sessions already configured on your host:
+```bash
+docker compose up -d --build
+```
+The stack mounts:
 - Host `gh` credentials (`~/.config/gh`) for Copilot.
 - Host Antigravity session (`~/.gemini`) for Antigravity.
+
+#### Option B: Standalone / Self-Contained
+If you do not want to install `agy` on the host, or want a fully self-contained container with `gh` and `agy` pre-installed:
+```bash
+docker compose -f docker-compose.standalone.yml up -d --build
+```
+- **Copilot**: Set `GITHUB_TOKEN=gho_...` directly in `.env`.
+- **Antigravity**: Authenticate directly inside the container via `docker compose -f docker-compose.standalone.yml run --rm api agy` (auth is persisted in Docker named volume `gemini_data`), or pass an existing `~/.gemini` directory.
 
 ---
 

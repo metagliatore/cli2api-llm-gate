@@ -1,0 +1,113 @@
+name: cli2api-llm-gate
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Standalone Docker Compose
+# Uses Dockerfile.standalone (pre-installed gh and agy CLIs).
+#
+# Usage:
+#   docker compose -f docker-compose.standalone.yml up -d --build
+# ──────────────────────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  REDIS_URL: redis://redis:6379
+  API_KEYS: ${API_KEYS:-}
+  API_KEY: ${API_KEY:-}
+  RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-60}
+  PUBLIC_HEALTH: ${PUBLIC_HEALTH:-true}
+
+  # Active Provider: 'copilot' or 'antigravity'
+  PROVIDER: ${PROVIDER:-copilot}
+
+  # ── Antigravity options ──
+  ANTIGRAVITY_MODEL: ${ANTIGRAVITY_MODEL:-gemini-3.8-flash-high}
+  ANTIGRAVITY_EFFORT: ${ANTIGRAVITY_EFFORT:-}
+  AGY_PATH: ${AGY_PATH:-}
+
+  # ── Copilot options ──
+  COPILOT_BASE_URL: ${COPILOT_BASE_URL:-https://api.githubcopilot.com}
+  COPILOT_MODEL: ${COPILOT_MODEL:-gpt-4o-mini}
+  GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+
+  # ── Storage options ──
+  FILES_DIR: ${FILES_DIR:-/data/uploads}
+
+services:
+  # ── Reverse proxy (TLS termination) ────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ${CADDYFILE_PATH:-./Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - backend
+
+  # ── Redis (internal only) ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - backend
+
+  # ── FastAPI ────────────────────────────────────────────────────────────
+  api:
+    image: cli2api-llm-gate-api:standalone
+    build:
+      context: .
+      dockerfile: Dockerfile.standalone
+    restart: unless-stopped
+    command: uvicorn api:app --host 0.0.0.0 --port 8000
+    environment:
+      <<: *common-env
+    volumes:
+      - "${GH_CONFIG_DIR:-${HOME:-/root}/.config/gh}:/gh-config-ro:ro"
+      - "${GEMINI_DIR:-gemini_data}:/root/.gemini"
+      - files_data:/data/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ── RQ Worker ──────────────────────────────────────────────────────────
+  worker:
+    image: cli2api-llm-gate-worker:standalone
+    build:
+      context: .
+      dockerfile: Dockerfile.standalone
+    restart: unless-stopped
+    command: python worker.py
+    environment:
+      <<: *common-env
+    volumes:
+      - "${GH_CONFIG_DIR:-${HOME:-/root}/.config/gh}:/gh-config-ro:ro"
+      - "${GEMINI_DIR:-gemini_data}:/root/.gemini"
+      - files_data:/data/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+
+volumes:
+  caddy_data:
+  caddy_config:
+  files_data:
+  gemini_data:
+
+networks:
+  backend:
