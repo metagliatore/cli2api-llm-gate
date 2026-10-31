@@ -68,7 +68,7 @@ Public traffic reaches only Caddy (ports 80 and 443). FastAPI and Redis stay int
 ### 2. Setup and Launch
 
 ```bash
-git clone https://github.com/metagliatore/copilot-api.git cli2api-llm-gate
+git clone https://github.com/metagliatore/cli2api-llm-gate.git
 cd cli2api-llm-gate
 
 # Create your .env from template
