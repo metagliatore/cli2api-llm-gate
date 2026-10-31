@@ -2,6 +2,10 @@
 
 > **Transform Host CLI AI Tools (Google Antigravity & GitHub Copilot) into a Multi-Provider, OpenAI-Compatible HTTP Gateway.**
 
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="cli2api-llm-gate terminal streaming demo" width="850">
+</p>
+
 A production-ready containerized microservice that bridges **Google Antigravity (`agy`)** and **GitHub Copilot / GitHub Models** into a unified, **OpenAI-compatible HTTP API**.
 
 It allows external applications (**Home Assistant**, **Pi Coding Agent**, **Aider**, **Open WebUI**, **Continue.dev**, **Dify**, **n8n**, custom bots) to consume your host AI capabilities over secure HTTPS without paying for separate cloud API tokens.
