@@ -11,6 +11,7 @@ from tasks import (
     format_messages_for_antigravity,
     dispatch_responses_completion,
     get_available_models,
+    _find_agy_bin,
 )
 from api import _get_valid_api_keys, _extract_api_key
 
@@ -205,6 +206,25 @@ class TestAuthHelpers(unittest.TestCase):
             self.assertIn("tok3", valid)
             self.assertIn("legacy_tok", valid)
             self.assertEqual(len(valid), 4)
+
+
+class TestBinaryResolution(unittest.TestCase):
+    def test_find_agy_bin_explicit_env(self):
+        with patch.dict(os.environ, {"AGY_PATH": "/custom/path/agy"}):
+            with patch("tasks.os.path.exists", return_value=True):
+                self.assertEqual(_find_agy_bin(), "/custom/path/agy")
+
+    def test_find_agy_bin_path_lookup(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("tasks.shutil.which", return_value="/opt/antigravity/bin/agy"):
+                self.assertEqual(_find_agy_bin(), "/opt/antigravity/bin/agy")
+
+    def test_find_agy_bin_fallback(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("tasks.shutil.which", return_value=None):
+                with patch("tasks.os.path.exists", side_effect=lambda p: p == "/usr/local/bin/agy"):
+                    with patch("tasks.os.access", return_value=True):
+                        self.assertEqual(_find_agy_bin(), "/usr/local/bin/agy")
 
 
 if __name__ == "__main__":
