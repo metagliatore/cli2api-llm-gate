@@ -155,6 +155,18 @@ Ideal if you prefer **not** to install `agy` or `gh` on your host, or want a com
 
 *(Note: In standalone mode, auth data in `gemini_data` persists across container restarts, stops, and rebuilds).*
 
+> [!TIP]
+> **Already running a Reverse Proxy (Nginx Proxy Manager, Traefik, Pangolin, Cloudflare Tunnel)?**  
+> If ports 80 and 443 are already occupied on your host (`bind: address already in use`), you can bypass Caddy:
+> 1. In `docker-compose.yml` (or `docker-compose.standalone.yml`), comment out the `caddy` service.
+> 2. Expose port `8000:8000` directly under the `api` service:
+>    ```yaml
+>    api:
+>      ports:
+>        - "8000:8000"
+>    ```
+> 3. Point your existing reverse proxy or Cloudflare Tunnel directly to `http://<server-ip>:8000`.
+
 ---
 
 ## 🔌 Integration Guides
