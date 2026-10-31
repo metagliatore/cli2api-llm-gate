@@ -1,5 +1,12 @@
 # cli2api-llm-gate
 
+<p align="center">
+  <a href="https://github.com/metagliatore/cli2api-llm-gate/actions/workflows/docker-publish.yml"><img src="https://github.com/metagliatore/cli2api-llm-gate/actions/workflows/docker-publish.yml/badge.svg" alt="CI & Docker Publish"></a>
+  <a href="https://github.com/metagliatore/cli2api-llm-gate/releases"><img src="https://img.shields.io/github/v/release/metagliatore/cli2api-llm-gate?include_prereleases&color=blue" alt="GitHub Release"></a>
+  <a href="https://github.com/metagliatore/cli2api-llm-gate/pkgs/container/cli2api-llm-gate"><img src="https://img.shields.io/badge/ghcr.io-cli2api--llm--gate-blue?logo=docker" alt="GHCR Container"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
+</p>
+
 > **Transform Host CLI AI Tools (Google Antigravity & GitHub Copilot) into a Multi-Provider, OpenAI-Compatible HTTP Gateway.**
 
 <p align="center">
@@ -104,16 +111,17 @@ DOMAIN=api.your-domain.com
 
 #### 🔹 Option A: Standard / Lightweight (Recommended)
 
-Uses the lightweight base image. It bridges the CLI sessions already present on your host without duplicating binaries.
+Uses the official pre-built lightweight image from **GHCR** (`ghcr.io/metagliatore/cli2api-llm-gate:latest`). It bridges the CLI sessions already present on your host without duplicating binaries or requiring local compilation.
 
 1. **Host Authentication**:
    - **For GitHub Copilot**: Run `gh auth login` on the host machine.
    - **For Google Antigravity**: Ensure the `agy` CLI is installed on the host and you have run your initial Google login (`~/.gemini`).
 
-2. **Launch the stack**:
+2. **Launch the stack (Zero-Build)**:
    ```bash
-   docker compose up -d --build
+   docker compose up -d
    ```
+   *(To force building locally from source instead of using the GHCR image, pass `--build`)*.
 
 *How it works*:
 - The container mounts `~/.config/gh` in read-only mode; `entrypoint.sh` automatically extracts `gh auth token`.

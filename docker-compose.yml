@@ -63,7 +63,7 @@ services:
 
   # ── FastAPI ────────────────────────────────────────────────────────────
   api:
-    image: cli2api-llm-gate-api:latest
+    image: ghcr.io/metagliatore/cli2api-llm-gate:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -83,7 +83,7 @@ services:
 
   # ── RQ Worker ──────────────────────────────────────────────────────────
   worker:
-    image: cli2api-llm-gate-worker:latest
+    image: ghcr.io/metagliatore/cli2api-llm-gate:latest
     build:
       context: .
       dockerfile: Dockerfile
