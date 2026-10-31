@@ -2,9 +2,11 @@
 
 <p align="center">
   <a href="https://github.com/metagliatore/cli2api-llm-gate/actions/workflows/docker-publish.yml"><img src="https://github.com/metagliatore/cli2api-llm-gate/actions/workflows/docker-publish.yml/badge.svg" alt="CI & Docker Publish"></a>
-  <a href="https://github.com/metagliatore/cli2api-llm-gate/releases"><img src="https://img.shields.io/github/v/release/metagliatore/cli2api-llm-gate?include_prereleases&color=blue" alt="GitHub Release"></a>
-  <a href="https://github.com/metagliatore/cli2api-llm-gate/pkgs/container/cli2api-llm-gate"><img src="https://img.shields.io/badge/ghcr.io-cli2api--llm--gate-blue?logo=docker" alt="GHCR Container"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
+  <a href="https://github.com/metagliatore/cli2api-llm-gate/releases"><img src="https://img.shields.io/github/v/release/metagliatore/cli2api-llm-gate?color=blue" alt="GitHub Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white" alt="Docker Ready">
+  <img src="https://img.shields.io/badge/Tests-21%20Passed-brightgreen" alt="Tests">
 </p>
 
 > **Transform Host CLI AI Tools (Google Antigravity & GitHub Copilot) into a Multi-Provider, OpenAI-Compatible HTTP Gateway.**
