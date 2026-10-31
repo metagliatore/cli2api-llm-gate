@@ -17,7 +17,8 @@ It allows external applications (**Home Assistant**, **Pi Coding Agent**, **Aide
 - **Asynchronous Task Queue (Redis RQ)**: Handles heavy batch jobs, long prompts, and image processing (`/ask`, `/ask-image`, `/result/{job_id}`).
 - **Usage & Quota Monitoring (`/v1/antigravity/usage` & `/usage`)**: Real-time stats on daily conversation counts, step turns, and rate limit status (`RESOURCE_EXHAUSTED`).
 - **Transparent Model Aliasing**: Client requests specifying legacy model names (e.g. `gpt-4o-mini`) are automatically mapped to the active provider default without breaking clients.
-- **Zero-Credential Overhead**: Automatically mounts and reuses host CLI credentials (`~/.gemini` for Antigravity, `~/.config/gh` for Copilot).
+- **Flexible Deployment**: Choose between **Standard Mode** (ultra-lightweight ~300 MB, reusing host CLI sessions) and **Standalone Mode** (all-in-docker ~660 MB, with `gh` and `agy` pre-installed and isolated volume storage).
+- **Zero-Credential Overhead**: Automatically mounts host CLI credentials or accepts standard environment tokens (`GITHUB_TOKEN` in `.env`).
 - **Production Hardened**: Caddy reverse proxy with automated TLS certificates (Let's Encrypt / ZeroSSL), multi-token Bearer authorization, and Redis sliding-window rate limiting.
 
 ---
@@ -50,52 +51,97 @@ It allows external applications (**Home Assistant**, **Pi Coding Agent**, **Aide
       [Provider: antigravity]                                     [Provider: copilot]
     Google Antigravity CLI (`agy`)                              GitHub Models / Copilot API
   (Gemini 3.8, Claude 4.6, GPT-OSS)                                (GPT-4o, Llama 3.1, etc.)
-  (Mounted ~/.gemini credentials)                                 (Mounted ~/.config/gh auth)
+ (Host ~/.gemini or gemini_data volume)                          (Host ~/.config/gh or GITHUB_TOKEN)
 ```
 
 Public traffic reaches only Caddy (ports 80 and 443). FastAPI and Redis stay internal to the isolated Docker network.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start & Deployment Modes
 
-### 1. Prerequisites
+You can run `cli2api-llm-gate` in two modes depending on your infrastructure preference:
 
-- **Docker & Docker Compose** installed on the host.
-- **For GitHub Copilot**: `gh` CLI installed and authenticated on the host (`gh auth login`).
-- **For Google Antigravity**: Antigravity CLI (`agy`) installed and authenticated on the host (`~/.gemini`).
+| Feature | Option A: Standard (Recommended) | Option B: Standalone |
+| :--- | :--- | :--- |
+| **Image Size** | **~300 MB** (ultra-lightweight) | **~660 MB** |
+| **Host CLI Required** | Yes (`gh` and/or `agy` on host) | **No** (CLIs pre-installed inside container) |
+| **Copilot Auth** | Mounts host `~/.config/gh` (auto-token) | Direct `GITHUB_TOKEN=gho_...` in `.env` |
+| **Antigravity Auth** | Mounts host `~/.gemini` session | Stored in Docker named volume `gemini_data` |
+| **Docker Compose** | `docker-compose.yml` | `docker-compose.standalone.yml` |
 
-### 2. Setup and Launch
+---
+
+### Step 1: Clone Repository & Configure `.env`
 
 ```bash
 git clone https://github.com/metagliatore/cli2api-llm-gate.git
 cd cli2api-llm-gate
 
-# Create your .env from template
+# Copy template environment file
 cp .env.example .env
-
-# Edit .env and configure your domain and secret tokens:
-# PROVIDER=antigravity      # or 'copilot'
-# API_KEYS=token_ha,token_pi_agent,token_mobile
-# DOMAIN=api.your-domain.com
 ```
 
-#### Option A: Standard / Lightweight (Recommended)
-Uses the lightweight default image (~300 MB). It connects seamlessly to the CLI sessions already configured on your host:
-```bash
-docker compose up -d --build
-```
-The stack mounts:
-- Host `gh` credentials (`~/.config/gh`) for Copilot.
-- Host Antigravity session (`~/.gemini`) for Antigravity.
+Edit your `.env` to configure your gateway:
+```ini
+# Choose active provider: 'antigravity' or 'copilot'
+PROVIDER=antigravity
 
-#### Option B: Standalone / Self-Contained
-If you do not want to install `agy` on the host, or want a fully self-contained container with `gh` and `agy` pre-installed:
-```bash
-docker compose -f docker-compose.standalone.yml up -d --build
+# Security: comma-separated list of Bearer tokens accepted by the gateway
+API_KEYS=token_ha,token_pi_agent,token_mobile
+
+# Domain name for Caddy automatic HTTPS (or 'localhost' for local testing)
+DOMAIN=api.your-domain.com
 ```
-- **Copilot**: Set `GITHUB_TOKEN=gho_...` directly in `.env`.
-- **Antigravity**: Authenticate directly inside the container via `docker compose -f docker-compose.standalone.yml run --rm api agy` (auth is persisted in Docker named volume `gemini_data`), or pass an existing `~/.gemini` directory.
+
+---
+
+### Step 2: Choose Your Deployment & Authentication Mode
+
+#### 🔹 Option A: Standard / Lightweight (Recommended)
+
+Uses the lightweight base image. It bridges the CLI sessions already present on your host without duplicating binaries.
+
+1. **Host Authentication**:
+   - **For GitHub Copilot**: Run `gh auth login` on the host machine.
+   - **For Google Antigravity**: Ensure the `agy` CLI is installed on the host and you have run your initial Google login (`~/.gemini`).
+
+2. **Launch the stack**:
+   ```bash
+   docker compose up -d --build
+   ```
+
+*How it works*:
+- The container mounts `~/.config/gh` in read-only mode; `entrypoint.sh` automatically extracts `gh auth token`.
+- The container mounts `~/.gemini` directly, giving immediate access to your active Antigravity session and credentials.
+
+---
+
+#### 🔹 Option B: Standalone / Self-Contained (All-in-Docker)
+
+Ideal if you prefer **not** to install `agy` or `gh` on your host, or want a completely isolated container stack. Both CLIs are pre-compiled and bundled inside the image.
+
+1. **Authentication Configuration**:
+   - **For GitHub Copilot**:
+     Add your GitHub token directly into your `.env` file:
+     ```ini
+     GITHUB_TOKEN=gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+     ```
+     *(No host directory mounting or local `gh` CLI required).*
+
+   - **For Google Antigravity**:
+     Perform a one-time interactive login directly inside the container:
+     ```bash
+     docker compose -f docker-compose.standalone.yml run --rm api agy
+     ```
+     A Google OAuth authorization URL will appear in your terminal. Open the URL in your browser, approve access, and the session token is automatically saved into the Docker persistent named volume `gemini_data` (`/root/.gemini/antigravity-cli/antigravity-oauth-token`).
+
+2. **Launch the stack**:
+   ```bash
+   docker compose -f docker-compose.standalone.yml up -d --build
+   ```
+
+*(Note: In standalone mode, auth data in `gemini_data` persists across container restarts, stops, and rebuilds).*
 
 ---
 
