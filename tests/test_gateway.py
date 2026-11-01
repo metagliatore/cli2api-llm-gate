@@ -12,6 +12,7 @@ from tasks import (
     dispatch_responses_completion,
     get_available_models,
     _find_agy_bin,
+    _antigravity_token_check,
 )
 from api import _get_valid_api_keys, _extract_api_key
 
@@ -225,6 +226,25 @@ class TestBinaryResolution(unittest.TestCase):
                 with patch("tasks.os.path.exists", side_effect=lambda p: p == "/usr/local/bin/agy"):
                     with patch("tasks.os.access", return_value=True):
                         self.assertEqual(_find_agy_bin(), "/usr/local/bin/agy")
+
+
+class TestAntigravityAuthCheck(unittest.TestCase):
+    def test_auth_check_token_missing(self):
+        with patch("tasks.os.path.isfile", return_value=False):
+            err = _antigravity_token_check()
+            self.assertIsNotNone(err)
+            self.assertIn("Antigravity session token not found", err["error"])
+
+    def test_auth_check_token_present(self):
+        with patch("tasks.os.path.isfile", return_value=True), patch("tasks.os.path.getsize", return_value=128):
+            err = _antigravity_token_check()
+            self.assertIsNone(err)
+
+    def test_auth_check_skip_env(self):
+        with patch.dict(os.environ, {"ANTIGRAVITY_SKIP_AUTH_CHECK": "true"}):
+            with patch("tasks.os.path.isfile", return_value=False):
+                err = _antigravity_token_check()
+                self.assertIsNone(err)
 
 
 if __name__ == "__main__":

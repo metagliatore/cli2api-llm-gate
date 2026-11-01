@@ -1,4 +1,4 @@
-name: cli2api-llm-gate
+name: cli2api-llm-gate-standalone
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Standalone Docker Compose
@@ -65,7 +65,7 @@ services:
 
   # ── FastAPI ────────────────────────────────────────────────────────────
   api:
-    image: cli2api-llm-gate-api:standalone
+    image: cli2api-llm-gate:standalone
     build:
       context: .
       dockerfile: Dockerfile.standalone
@@ -74,7 +74,7 @@ services:
     environment:
       <<: *common-env
     volumes:
-      - "${GH_CONFIG_DIR:-${HOME:-/root}/.config/gh}:/gh-config-ro:ro"
+      - "${GH_CONFIG_DIR:-gh_data}:/root/.config/gh"
       - "${GEMINI_DIR:-gemini_data}:/root/.gemini"
       - files_data:/data/uploads
     depends_on:
@@ -85,7 +85,7 @@ services:
 
   # ── RQ Worker ──────────────────────────────────────────────────────────
   worker:
-    image: cli2api-llm-gate-worker:standalone
+    image: cli2api-llm-gate:standalone
     build:
       context: .
       dockerfile: Dockerfile.standalone
@@ -94,7 +94,7 @@ services:
     environment:
       <<: *common-env
     volumes:
-      - "${GH_CONFIG_DIR:-${HOME:-/root}/.config/gh}:/gh-config-ro:ro"
+      - "${GH_CONFIG_DIR:-gh_data}:/root/.config/gh"
       - "${GEMINI_DIR:-gemini_data}:/root/.gemini"
       - files_data:/data/uploads
     depends_on:
@@ -108,6 +108,7 @@ volumes:
   caddy_config:
   files_data:
   gemini_data:
+  gh_data:
 
 networks:
   backend:

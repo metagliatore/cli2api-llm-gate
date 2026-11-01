@@ -989,6 +989,34 @@ def _get_subprocess_env() -> dict:
     return env
 
 
+def _antigravity_token_check() -> Optional[Dict[str, Any]]:
+    """Check if Antigravity OAuth session token is present on disk."""
+    if os.environ.get("ANTIGRAVITY_SKIP_AUTH_CHECK", "").lower() in ("true", "1", "yes"):
+        return None
+    candidate_paths = [
+        "/root/.gemini/antigravity-cli/antigravity-oauth-token",
+        os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token"),
+    ]
+    gemini_dir = os.getenv("GEMINI_DIR")
+    if gemini_dir:
+        candidate_paths.append(os.path.join(gemini_dir, "antigravity-cli", "antigravity-oauth-token"))
+
+    for p in candidate_paths:
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            return None
+
+    return {
+        "error": (
+            "Antigravity session token not found. "
+            "Please authenticate by running: docker compose exec -it api agy "
+            "(or 'docker compose run --rm api agy') and complete the Google login."
+        ),
+        "content": None,
+        "model": None,
+        "provider": "antigravity",
+    }
+
+
 def ask_antigravity(
     prompt: str,
     model: str | None = None,
@@ -996,6 +1024,9 @@ def ask_antigravity(
     effort: str | None = None,
 ) -> dict:
     """Execute non-interactive prompt using the agy CLI."""
+    err = _antigravity_token_check()
+    if err:
+        return err
     agy_bin = _find_agy_bin()
     default_model = os.getenv("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
     if model and not is_antigravity_model(model):
@@ -1124,6 +1155,9 @@ def chat_complete_antigravity(
     **kwargs,
 ) -> Dict[str, Any]:
     """Execute OpenAI-compatible chat completion using Antigravity."""
+    err = _antigravity_token_check()
+    if err:
+        return err
     incremental = bool(conversation_id and _conversation_exists_in_agy(conversation_id))
     prompt_res = format_messages_for_antigravity(
         messages, tools=tools, tool_choice=tool_choice, incremental=incremental, return_attached_dirs=True
@@ -1292,6 +1326,26 @@ def chat_stream_antigravity(
         init_chunk["system_fingerprint"] = active_conv_id
     yield f"data: {json.dumps(init_chunk)}\n\n"
 
+    err = _antigravity_token_check()
+    if err:
+        err_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": chosen_model,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": f"\n[{err['error']}]"},
+                "finish_reason": "stop",
+            }],
+        }
+        if active_conv_id:
+            err_chunk["conversation_id"] = active_conv_id
+            err_chunk["system_fingerprint"] = active_conv_id
+        yield f"data: {json.dumps(err_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
     try:
         proc = subprocess.Popen(
             cmd,
@@ -1452,7 +1506,13 @@ def chat_stream_antigravity(
 
     # If agy reported an error and no output was produced, yield error chunk
     if (proc.returncode != 0 or error_msg) and not full_text:
-        err_detail = error_msg or f"Antigravity process exited with code {proc.returncode}"
+        err_stderr = ""
+        if proc.stderr:
+            try:
+                err_stderr = proc.stderr.read().strip()
+            except Exception:
+                pass
+        err_detail = error_msg or err_stderr or f"Antigravity process exited with code {proc.returncode}"
         err_chunk = {
             "id": completion_id,
             "object": "chat.completion.chunk",
