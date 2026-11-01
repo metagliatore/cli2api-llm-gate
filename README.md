@@ -512,18 +512,24 @@ python3 -m unittest discover tests
 
 ```
 .
-├── api.py              # FastAPI app (OpenAI Chat & Responses endpoints, auth, rate limiting)
-├── worker.py           # RQ worker entry point
-├── tasks.py            # Task execution (Copilot OpenAI client, Antigravity agy CLI, formatters)
-├── entrypoint.sh       # Injects GITHUB_TOKEN and validates agy CLI binary
-├── requirements.txt    # Python dependencies
-├── Dockerfile          # Python 3.11-slim container with gh CLI and agy PATH
-├── docker-compose.yml  # Multi-service stack (Caddy, Redis, API, Worker)
-├── Caddyfile           # Caddy reverse proxy with TLS & security headers
-├── tests/              # Automated test suite
-│   └── test_gateway.py # Unit tests for routing, auth, converters, and endpoints
-├── MEMORY.md           # Architecture and technical documentation
-└── .env.example        # Environment variable template
+├── api.py                      # FastAPI app (OpenAI Chat, Responses & Files API, auth, rate limiting)
+├── worker.py                   # RQ worker entry point
+├── tasks.py                    # Task execution (Copilot OpenAI client, Antigravity agy CLI, formatters)
+├── files_store.py              # OpenAI Files storage, MIME extraction & metadata caching
+├── entrypoint.sh               # Injects GITHUB_TOKEN and validates agy CLI binary
+├── requirements.txt            # Python dependencies
+├── Dockerfile                  # Lightweight Python 3.11-slim container (GHCR default)
+├── Dockerfile.standalone       # Self-contained container with bundled gh and agy CLIs
+├── docker-compose.yml          # Default multi-service stack (Caddy, Redis, API, Worker)
+├── docker-compose.standalone.yml # Standalone multi-service stack with persistent volume
+├── .dockerignore               # Optimizes docker build context
+├── Caddyfile                   # Caddy reverse proxy with automatic TLS & security headers
+├── tests/                      # Automated test suite (21 unit tests)
+│   ├── test_gateway.py         # Tests for routing, auth, converters, and binary resolution
+│   └── test_files.py           # Tests for OpenAI Files API & multimodal uploads
+├── docs/assets/                # Documentation assets (demo.gif)
+├── MEMORY.md                   # Architecture and technical documentation
+└── .env.example                # Environment variable template
 ```
 
 ---
