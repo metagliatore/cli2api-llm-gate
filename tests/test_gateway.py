@@ -13,6 +13,8 @@ from tasks import (
     get_available_models,
     _find_agy_bin,
     _antigravity_token_check,
+    ask_antigravity,
+    chat_stream_antigravity,
 )
 from api import _get_valid_api_keys, _extract_api_key
 
@@ -245,6 +247,44 @@ class TestAntigravityAuthCheck(unittest.TestCase):
             with patch("tasks.os.path.isfile", return_value=False):
                 err = _antigravity_token_check()
                 self.assertIsNone(err)
+
+
+class TestAntigravityStdinExecution(unittest.TestCase):
+    def test_ask_antigravity_uses_stdin(self):
+        with patch("tasks._antigravity_token_check", return_value=None), \
+             patch("tasks._find_agy_bin", return_value="/mock/bin/agy"), \
+             patch("tasks.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='{"response": "ok"}', stderr="")
+            res = ask_antigravity(prompt="hello world prompt")
+            self.assertEqual(res.get("content"), "ok")
+            mock_run.assert_called_once()
+            call_kwargs = mock_run.call_args[1]
+            call_cmd = mock_run.call_args[0][0]
+            self.assertNotIn("-p", call_cmd)
+            self.assertIn("--input-format", call_cmd)
+            self.assertIn("text", call_cmd)
+            self.assertEqual(call_kwargs.get("input"), "hello world prompt")
+
+    def test_stream_antigravity_uses_stdin(self):
+        with patch("tasks._antigravity_token_check", return_value=None), \
+             patch("tasks._find_agy_bin", return_value="/mock/bin/agy"), \
+             patch("tasks.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdin = MagicMock()
+            mock_proc.stdout = ['{"event": "result", "result": {"response": "done"}}']
+            mock_proc.stderr = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            gen = chat_stream_antigravity(messages=[{"role": "user", "content": "hello streaming"}])
+            chunks = list(gen)
+            self.assertTrue(len(chunks) > 0)
+            mock_popen.assert_called_once()
+            call_cmd = mock_popen.call_args[0][0]
+            self.assertNotIn("-p", call_cmd)
+            self.assertIn("--input-format", call_cmd)
+            self.assertIn("text", call_cmd)
 
 
 if __name__ == "__main__":

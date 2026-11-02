@@ -1042,7 +1042,7 @@ def ask_antigravity(
 
     cmd = [
         agy_bin,
-        "-p", prompt,
+        "--input-format", "text",
         "--model", chosen_model,
         "--output-format", "json",
         "--dangerously-skip-permissions",
@@ -1054,7 +1054,14 @@ def ask_antigravity(
         cmd.extend(["--conversation", conversation_id])
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=_get_subprocess_env())
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=_get_subprocess_env(),
+        )
     except FileNotFoundError:
         return {
             "error": f"agy binary not found at '{agy_bin}'. Ensure Antigravity is installed/mounted.",
@@ -1174,7 +1181,7 @@ def chat_complete_antigravity(
 
     cmd = [
         agy_bin,
-        "-p", prompt,
+        "--input-format", "text",
         "--model", chosen_model,
         "--output-format", "json",
         "--dangerously-skip-permissions",
@@ -1188,7 +1195,14 @@ def chat_complete_antigravity(
         cmd.extend(["--conversation", conversation_id])
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=_get_subprocess_env())
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=_get_subprocess_env(),
+        )
     except FileNotFoundError:
         return {
             "error": f"agy binary not found at '{agy_bin}'. Ensure Antigravity is installed/mounted.",
@@ -1291,7 +1305,7 @@ def chat_stream_antigravity(
 
     cmd = [
         agy_bin,
-        "-p", prompt,
+        "--input-format", "text",
         "--model", chosen_model,
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
@@ -1349,12 +1363,25 @@ def chat_stream_antigravity(
     try:
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
             env=_get_subprocess_env(),
         )
+
+        def _feed_stdin():
+            try:
+                if proc.stdin:
+                    proc.stdin.write(prompt)
+                    proc.stdin.close()
+            except Exception as e:
+                logger.warning("Error feeding prompt to agy stdin: %s", e)
+
+        import threading
+        stdin_thread = threading.Thread(target=_feed_stdin, daemon=True)
+        stdin_thread.start()
     except Exception as e:
         err_chunk = {
             "id": completion_id,
