@@ -264,12 +264,50 @@ def get_antigravity_usage_stats() -> Dict[str, Any]:
 
 
 def _get_github_token() -> str:
-    """Extract GitHub token from env, mounted gh config, or gh CLI."""
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    if token:
-        return token
+    """
+    Extract GitHub token according to GitHub Copilot precedence:
+      1. COPILOT_GITHUB_TOKEN
+      2. GH_TOKEN
+      3. GITHUB_TOKEN
+      4. Fallback ~/.copilot/config.json (standalone GitHub Copilot CLI)
+      5. Mounted ~/.config/gh/hosts.yml (GitHub CLI hosts file)
+      6. gh auth token command fallback
+    """
+    # 1-3: Environment variables
+    for env_var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.getenv(env_var, "").strip()
+        if token:
+            os.environ["GITHUB_TOKEN"] = token
+            return token
 
-    # Check hosts.yml in mounted or host config paths
+    # 4: Check ~/.copilot/config.json (GitHub Copilot CLI configuration fallback)
+    copilot_paths = [
+        os.path.expanduser("~/.copilot/config.json"),
+        os.path.join(os.getenv("COPILOT_HOME", ""), "config.json") if os.getenv("COPILOT_HOME") else "",
+        "/root/.copilot/config.json",
+        "/copilot-config-ro/config.json",
+    ]
+    for cpath in copilot_paths:
+        if cpath and os.path.isfile(cpath):
+            try:
+                with open(cpath, "r", encoding="utf-8") as f:
+                    cdata = json.load(f)
+                if isinstance(cdata, dict):
+                    token = (
+                        cdata.get("oauthToken")
+                        or cdata.get("token")
+                        or cdata.get("oauth_token")
+                        or cdata.get("access_token")
+                    )
+                    if token and isinstance(token, str):
+                        token = token.strip()
+                        if token:
+                            os.environ["GITHUB_TOKEN"] = token
+                            return token
+            except Exception as e:
+                logger.warning("Error reading %s: %s", cpath, e)
+
+    # 5: Check hosts.yml in mounted or host config paths (GitHub CLI)
     candidate_paths = [
         os.path.expanduser("~/.config/gh/hosts.yml"),
         "/gh-config-ro/hosts.yml",
@@ -301,7 +339,7 @@ def _get_github_token() -> str:
             except Exception as e:
                 logger.warning("Error reading %s: %s", path, e)
 
-    # Fallback: gh auth token command
+    # 6: Fallback: gh auth token command
     try:
         proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=5)
         if proc.returncode == 0 and proc.stdout.strip():

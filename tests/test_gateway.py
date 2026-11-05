@@ -359,5 +359,45 @@ class TestHardeningFeatures(unittest.TestCase):
             mock_proc.wait.assert_called_with(timeout=0.1)
 
 
+class TestCopilotTokenPrecedence(unittest.TestCase):
+    def test_env_token_precedence(self):
+        from tasks import _get_github_token
+
+        # 1. COPILOT_GITHUB_TOKEN takes highest precedence
+        with patch.dict(os.environ, {
+            "COPILOT_GITHUB_TOKEN": "token_copilot_special",
+            "GH_TOKEN": "token_gh",
+            "GITHUB_TOKEN": "token_github",
+        }, clear=True):
+            self.assertEqual(_get_github_token(), "token_copilot_special")
+
+        # 2. GH_TOKEN takes precedence over GITHUB_TOKEN
+        with patch.dict(os.environ, {
+            "GH_TOKEN": "token_gh",
+            "GITHUB_TOKEN": "token_github",
+        }, clear=True):
+            self.assertEqual(_get_github_token(), "token_gh")
+
+        # 3. GITHUB_TOKEN used when others are unset
+        with patch.dict(os.environ, {
+            "GITHUB_TOKEN": "token_github",
+        }, clear=True):
+            self.assertEqual(_get_github_token(), "token_github")
+
+    def test_copilot_cli_json_fallback(self):
+        import tempfile
+        from tasks import _get_github_token
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = os.path.join(tmp_dir, "config.json")
+            with open(config_file, "w") as f:
+                json.dump({"oauthToken": "gho_test_standalone_copilot"}, f)
+
+            with patch.dict(os.environ, {}, clear=True), \
+                 patch("tasks.os.path.expanduser", return_value=config_file):
+                token = _get_github_token()
+                self.assertEqual(token, "gho_test_standalone_copilot")
+
+
 if __name__ == "__main__":
     unittest.main()

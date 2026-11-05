@@ -6,7 +6,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white" alt="Docker Ready">
-  <img src="https://img.shields.io/badge/Tests-30%20Passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/Tests-32%20Passed-brightgreen" alt="Tests">
 </p>
 
 > **Transform Host CLI AI Tools (Google Antigravity & GitHub Copilot) into a Multi-Provider, OpenAI-Compatible HTTP Gateway.**
@@ -168,6 +168,48 @@ Ideal if you prefer **not** to install `agy` or `gh` on your host, or want a com
 >        - "8000:8000"
 >    ```
 > 3. Point your existing reverse proxy or Cloudflare Tunnel directly to `http://<server-ip>:8000`.
+
+---
+
+### 🔐 How GitHub Copilot Authentication Works
+
+A common question is: *Do I need `gh` installed on my machine? Is `gh` obsolete? How does Copilot authentication work?*
+
+1. **How `gh` is used in this gateway**:
+   - The GitHub CLI (`gh`) is used **strictly as an authentication helper** to extract your GitHub OAuth session token.
+   - **No CLI subprocess is spawned during user chat completions.** Unlike Antigravity (which controls local `agy` CLI processes), Copilot requests are sent **directly via HTTP/HTTPS** to `https://api.githubcopilot.com` using native streaming, resulting in ultra-low latency, full tool calling support, and zero CLI process overhead.
+   - **`gh` is not obsolete**: It is GitHub's official, fully supported tool for repository and identity management. *(Note: only the legacy shell extension `gh copilot` was retired in favor of the standalone `copilot` CLI agent, which is unrelated to OAuth login).*
+
+2. **Supported Authentication Options (Zero Host Friction)**:
+   You have complete freedom in how you authenticate:
+   * **Option 1: Automatic from Host (`gh auth login`)**:  
+     If you already use GitHub CLI on your host machine, `docker-compose.yml` mounts `~/.config/gh` in read-only mode. The gateway extracts the token automatically.
+   * **Option 2: Standalone Copilot CLI (`~/.copilot/config.json`)**:  
+     If you use the new standalone `copilot` CLI, fallback token configurations stored in `~/.copilot/config.json` are automatically discovered.
+   * **Option 3: Direct Environment Variable (`.env` — Zero CLI required)**:  
+     If you do not want to install or run any CLI on your host, simply set your token in `.env`:
+     ```ini
+     GITHUB_TOKEN=gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+     # Or standard Copilot CLI variables:
+     # COPILOT_GITHUB_TOKEN=gho_xxxxxxxxxxxxxxxxxxxx
+     # GH_TOKEN=gho_xxxxxxxxxxxxxxxxxxxx
+     ```
+   * **Option 4: In-Container Login (`gh` bundled inside Docker)**:  
+     Both container variants have `gh` pre-installed inside the image. You can authenticate interactively inside the running container without ever installing `gh` on your host:
+     ```bash
+     docker compose exec -it api gh auth login
+     ```
+
+3. **Official Token Resolution Precedence**:  
+   The gateway follows the official GitHub Copilot resolution chain:
+   ```
+   1. COPILOT_GITHUB_TOKEN (environment variable)
+   2. GH_TOKEN (environment variable)
+   3. GITHUB_TOKEN (environment variable)
+   4. ~/.copilot/config.json (standalone Copilot CLI configuration)
+   5. ~/.config/gh/hosts.yml (mounted host GitHub CLI configuration)
+   6. gh auth token (fallback command inside container)
+   ```
 
 ---
 

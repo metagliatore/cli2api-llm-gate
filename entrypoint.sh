@@ -6,14 +6,36 @@ PROVIDER="${PROVIDER:-copilot}"
 
 # ── GitHub Copilot Auth ───────────────────────────────────────────────────────
 if [ -z "$GITHUB_TOKEN" ]; then
-    if [ -d "/gh-config-ro" ] && [ "$(ls -A /gh-config-ro 2>/dev/null)" ]; then
-        # gh attempts write migrations even on read, so copy the RO mount
-        # to a writable temp directory before calling `gh auth token`.
-        cp -r /gh-config-ro /tmp/gh-config
-        GITHUB_TOKEN=$(GH_CONFIG_DIR=/tmp/gh-config gh auth token 2>/dev/null) || true
+    if [ -n "$COPILOT_GITHUB_TOKEN" ]; then
+        GITHUB_TOKEN="$COPILOT_GITHUB_TOKEN"
+    elif [ -n "$GH_TOKEN" ]; then
+        GITHUB_TOKEN="$GH_TOKEN"
+    fi
+fi
+
+if [ -z "$GITHUB_TOKEN" ]; then
+    # Fallback 1: Check ~/.copilot/config.json from standalone GitHub Copilot CLI
+    for copilot_file in "/copilot-config-ro/config.json" "/root/.copilot/config.json"; do
+        if [ -f "$copilot_file" ]; then
+            TOKEN_FOUND=$(grep -E '"(oauthToken|token|oauth_token|access_token)"' "$copilot_file" 2>/dev/null | head -n1 | sed -e 's/.*:[[:space:]]*"//' -e 's/".*//' | tr -d '\r\n') || true
+            if [ -n "$TOKEN_FOUND" ]; then
+                GITHUB_TOKEN="$TOKEN_FOUND"
+                break
+            fi
+        fi
+    done
+
+    # Fallback 2: Check mounted GitHub CLI config (~/.config/gh)
+    if [ -z "$GITHUB_TOKEN" ]; then
+        if [ -d "/gh-config-ro" ] && [ "$(ls -A /gh-config-ro 2>/dev/null)" ]; then
+            # gh attempts write migrations even on read, so copy the RO mount
+            # to a writable temp directory before calling `gh auth token`.
+            cp -r /gh-config-ro /tmp/gh-config
+            GITHUB_TOKEN=$(GH_CONFIG_DIR=/tmp/gh-config gh auth token 2>/dev/null) || true
+        fi
     fi
 
-    # Fallback to local gh configuration (e.g. standalone named volume or local container login)
+    # Fallback 3: Local gh configuration (e.g. standalone named volume or local container login)
     if [ -z "$GITHUB_TOKEN" ]; then
         if [ -f "/root/.config/gh/hosts.yml" ] || [ -d "/root/.config/gh" ]; then
             GITHUB_TOKEN=$(gh auth token 2>/dev/null) || true
@@ -27,9 +49,15 @@ if [ -z "$GITHUB_TOKEN" ]; then
         echo "[entrypoint] GITHUB_TOKEN configured successfully."
         export GITHUB_TOKEN
     elif [ "$PROVIDER" = "copilot" ]; then
-        echo "[entrypoint] WARNING: could not obtain GITHUB_TOKEN via 'gh auth token'."
-        echo "[entrypoint] Make sure ~/.config/gh is mounted and you are logged in on the host (or set GITHUB_TOKEN in .env)."
+        echo "[entrypoint] WARNING: could not obtain GITHUB_TOKEN."
+        echo "[entrypoint] Options:"
+        echo "[entrypoint]   1. Run 'gh auth login' on host (with ~/.config/gh mounted)."
+        echo "[entrypoint]   2. Or run: docker compose exec -it api gh auth login"
+        echo "[entrypoint]   3. Or set GITHUB_TOKEN (or COPILOT_GITHUB_TOKEN) in your .env file."
     fi
+else
+    echo "[entrypoint] GITHUB_TOKEN configured from environment."
+    export GITHUB_TOKEN
 fi
 
 # ── Google Antigravity Auth / Binary Check ─────────────────────────────────────

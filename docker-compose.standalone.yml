@@ -27,6 +27,8 @@ x-common-env: &common-env
   COPILOT_BASE_URL: ${COPILOT_BASE_URL:-https://api.githubcopilot.com}
   COPILOT_MODEL: ${COPILOT_MODEL:-gpt-4o-mini}
   GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+  COPILOT_GITHUB_TOKEN: ${COPILOT_GITHUB_TOKEN:-}
+  GH_TOKEN: ${GH_TOKEN:-}
 
   # ── Storage options ──
   FILES_DIR: ${FILES_DIR:-/data/uploads}
