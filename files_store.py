@@ -278,10 +278,40 @@ def save_data_url_to_temp_file(data_url: str, filename_prefix: str = "inline") -
         with open(file_path, "wb") as f:
             f.write(raw_bytes)
 
+        # Periodically clean up stale temporary files (files older than 24h)
+        cleanup_old_temp_files(max_age_seconds=86400)
+
         return file_path, mime_type
     except Exception as e:
         logger.error("Failed to decode data URL to temp file: %s", e)
         return None
+
+
+def cleanup_old_temp_files(max_age_seconds: int = 86400) -> int:
+    """
+    Remove temporary upload files older than max_age_seconds (default 24h)
+    to prevent disk accumulation from base64 vision requests.
+    """
+    temp_dir = os.path.join(get_storage_dir(), "temp")
+    if not os.path.exists(temp_dir):
+        return 0
+
+    now = time.time()
+    deleted = 0
+    try:
+        for fname in os.listdir(temp_dir):
+            fpath = os.path.join(temp_dir, fname)
+            if os.path.isfile(fpath):
+                try:
+                    if now - os.path.getmtime(fpath) > max_age_seconds:
+                        os.remove(fpath)
+                        deleted += 1
+                except OSError:
+                    pass
+    except Exception as e:
+        logger.warning("Error during temp files cleanup: %s", e)
+
+    return deleted
 
 
 def extract_file_for_ai(file_id_or_path: str) -> Dict[str, Any]:

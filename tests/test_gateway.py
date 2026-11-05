@@ -287,5 +287,77 @@ class TestAntigravityStdinExecution(unittest.TestCase):
             self.assertIn("text", call_cmd)
 
 
+class TestHardeningFeatures(unittest.TestCase):
+    def test_cors_middleware_headers(self):
+        from fastapi.testclient import TestClient
+        from api import app
+        client = TestClient(app)
+        resp = client.get("/health", headers={"Origin": "http://localhost:3000"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("access-control-allow-origin"), "http://localhost:3000")
+
+    def test_cleanup_old_temp_files(self):
+        import tempfile
+        import time
+        from files_store import cleanup_old_temp_files
+
+        with tempfile.TemporaryDirectory() as temp_storage:
+            temp_dir = os.path.join(temp_storage, "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+
+            old_file = os.path.join(temp_dir, "old_vision.jpg")
+            new_file = os.path.join(temp_dir, "new_vision.jpg")
+
+            with open(old_file, "w") as f:
+                f.write("old")
+            with open(new_file, "w") as f:
+                f.write("new")
+
+            # Set old_file mtime to 48 hours ago
+            two_days_ago = time.time() - (48 * 3600)
+            os.utime(old_file, (two_days_ago, two_days_ago))
+
+            with patch("files_store.get_storage_dir", return_value=temp_storage):
+                deleted = cleanup_old_temp_files(max_age_seconds=86400)
+                self.assertEqual(deleted, 1)
+                self.assertFalse(os.path.exists(old_file))
+                self.assertTrue(os.path.exists(new_file))
+
+    def test_rate_limiter_increment_and_blocking(self):
+        from api import auth_and_rate_limit
+        from fastapi import HTTPException
+
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 61  # Over limit (limit is 60)
+
+        with patch("api.REDIS_URL", "redis://fake"), \
+             patch("api.redis_conn", mock_redis), \
+             patch("api.RATE_LIMIT_RPM", 60), \
+             patch("api._get_valid_api_keys", return_value={"test-key"}), \
+             patch("api._extract_api_key", return_value="test-key"):
+            req = MagicMock()
+            with self.assertRaises(HTTPException) as ctx:
+                auth_and_rate_limit(req)
+            self.assertEqual(ctx.exception.status_code, 429)
+            mock_redis.incr.assert_called_once()
+            called_key = mock_redis.incr.call_args[0][0]
+            self.assertTrue(called_key.startswith("rate_limit:"))
+
+    def test_kill_process_tree(self):
+        import signal
+        from tasks import _kill_process_tree
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 99999
+
+        with patch("tasks.os.getpgid", return_value=99999) as mock_getpgid, \
+             patch("tasks.os.killpg") as mock_killpg:
+            _kill_process_tree(mock_proc, timeout=0.1)
+            mock_getpgid.assert_called_with(99999)
+            mock_killpg.assert_called_with(99999, signal.SIGTERM)
+            mock_proc.wait.assert_called_with(timeout=0.1)
+
+
 if __name__ == "__main__":
     unittest.main()

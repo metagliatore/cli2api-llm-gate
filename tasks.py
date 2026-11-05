@@ -22,6 +22,7 @@ import tempfile
 import logging
 import sqlite3
 import subprocess
+import signal
 from typing import Optional, Union, List, Dict, Any, Generator, Tuple
 
 from files_store import (
@@ -1275,6 +1276,26 @@ def chat_complete_antigravity(
     return res_payload
 
 
+def _kill_process_tree(proc: Optional[subprocess.Popen], timeout: float = 1.0) -> None:
+    """Safely terminate a process and its entire child process tree via process group."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+        proc.wait(timeout=timeout)
+    except Exception:
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGKILL)
+            proc.wait(timeout=0.5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
 def chat_stream_antigravity(
     messages: List[Any],
     model: Optional[str] = None,
@@ -1368,6 +1389,7 @@ def chat_stream_antigravity(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
             env=_get_subprocess_env(),
         )
 
@@ -1510,26 +1532,11 @@ def chat_stream_antigravity(
         proc.wait()
 
     except GeneratorExit:
-        logger.info("Client aborted/disconnected stream; terminating agy process PID %s", proc.pid)
-        try:
-            proc.terminate()
-            proc.wait(timeout=1.0)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        logger.info("Client aborted/disconnected stream; terminating agy process group PID %s", proc.pid)
+        _kill_process_tree(proc)
         raise
     finally:
-        if proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=1.0)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+        _kill_process_tree(proc)
 
     # If agy reported an error and no output was produced, yield error chunk
     if (proc.returncode != 0 or error_msg) and not full_text:

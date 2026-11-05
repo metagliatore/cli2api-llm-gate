@@ -4,6 +4,7 @@ import time
 import hashlib
 from typing import Optional, Union, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query, Body, UploadFile, File, Form, Depends, Header, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, ConfigDict
 from redis import Redis
@@ -16,6 +17,7 @@ from files_store import (
     list_files,
     delete_file,
     get_file_metadata,
+    cleanup_old_temp_files,
 )
 
 from tasks import (
@@ -46,6 +48,26 @@ app = FastAPI(
     version="1.0.0",
     description="OpenAI-compatible and asynchronous API for GitHub Copilot / Models and Google Antigravity.",
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+def on_startup():
+    """Run housekeeping on startup: clean stale temp vision uploads."""
+    try:
+        cleaned = cleanup_old_temp_files(max_age_seconds=86400)
+        if cleaned:
+            print(f"[startup] Cleaned up {cleaned} stale temporary upload file(s).")
+    except Exception as e:
+        pass
+
 
 redis_conn = Redis.from_url(REDIS_URL)
 queue = Queue("copilot", connection=redis_conn)
@@ -102,6 +124,7 @@ def auth_and_rate_limit(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     key_fingerprint = hashlib.sha256(provided_key.encode()).hexdigest()[:16]
+    limiter_key = f"rate_limit:{key_fingerprint}:{int(time.time() // 60)}"
     try:
         current = redis_conn.incr(limiter_key)
         if current == 1:

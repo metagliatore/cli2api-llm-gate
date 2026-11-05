@@ -29,11 +29,18 @@ x-common-env: &common-env
   # ── Storage options ──
   FILES_DIR: ${FILES_DIR:-/data/uploads}
 
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # ── Reverse proxy (TLS termination) ────────────────────────────────────
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"
@@ -53,6 +60,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -68,6 +76,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     command: uvicorn api:app --host 0.0.0.0 --port 8000
     environment:
       <<: *common-env
@@ -88,6 +97,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     command: python worker.py
     environment:
       <<: *common-env
