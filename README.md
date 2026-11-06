@@ -6,7 +6,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white" alt="Docker Ready">
-  <img src="https://img.shields.io/badge/Tests-32%20Passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/Tests-38%20Passed-brightgreen" alt="Tests">
 </p>
 
 > **Transform Host CLI AI Tools (Google Antigravity & GitHub Copilot) into a Multi-Provider, OpenAI-Compatible HTTP Gateway.**
@@ -210,6 +210,49 @@ A common question is: *Do I need `gh` installed on my machine? Is `gh` obsolete?
    5. ~/.config/gh/hosts.yml (mounted host GitHub CLI configuration)
    6. gh auth token (fallback command inside container)
    ```
+
+---
+
+### 🩺 System Diagnostics (Doctor Command)
+
+To immediately verify that tokens, CLI binaries, Redis latency, rate limiting, and directories are properly operational, run the built-in diagnostic checker:
+
+```bash
+docker compose exec api python -m doctor
+```
+
+*(Or for standalone mode: `docker compose -f docker-compose.standalone.yml exec api python -m doctor`)*
+
+It outputs a clean terminal status table:
+
+```
+==================================================================================
+  cli2api-llm-gate – System Diagnostics & Health Check (Doctor)
+==================================================================================
+  Active Provider : ANTIGRAVITY
+──────────────────────────────────────────────────────────────────────────────────
+  COMPONENT        STATUS       DETAILS
+──────────────────────────────────────────────────────────────────────────────────
+  Copilot        ✅ OK        Token: gho_...xyz (User: @dev) | Model: gpt-4o-mini
+★ Antigravity    ✅ OK        Session active | Binary: /root/.gemini/bin/agy | Model: gemini-3.8-flash-high
+  Redis          ✅ OK        Connected (latency: 0.21ms) | redis://redis:6379
+  Rate Limiter   ✅ OK        Active (60 RPM sliding-window)
+  Storage        ✅ OK        Writable (/data/uploads) | 0 stored file(s)
+──────────────────────────────────────────────────────────────────────────────────
+  Overall Health  : ✅ HEALTHY (Ready to serve OpenAI-compatible requests)
+==================================================================================
+```
+
+#### Diagnostic HTTP Endpoint
+You can also inspect system health programmatically via the authenticated `/v1/doctor` endpoint:
+
+```bash
+# JSON summary
+curl -s -H "Authorization: Bearer <API_KEY>" https://api.your-domain.com/v1/doctor
+
+# Plain text table
+curl -s -H "Authorization: Bearer <API_KEY>" "https://api.your-domain.com/v1/doctor?format=text"
+```
 
 ---
 

@@ -637,3 +637,24 @@ def responses_endpoint(
 
     return result
 
+
+# ── System Diagnostics & Doctor Endpoint ──────────────────────────────────────
+
+@app.get("/v1/doctor")
+@app.get("/doctor")
+def doctor_endpoint(
+    format: Optional[str] = Query(None, description="Output format: 'json' (default) or 'text'"),
+    _: None = Depends(auth_and_rate_limit),
+):
+    """
+    Diagnostic & health inspection endpoint for all subsystems:
+    Copilot, Antigravity, Redis, Rate Limiter, and Storage.
+    Requires authentication to prevent leaking internal infrastructure status.
+    """
+    from doctor import run_diagnostics, format_doctor_report
+    diag = run_diagnostics()
+    if format == "text":
+        return Response(content=format_doctor_report(diag, use_colors=False), media_type="text/plain")
+    return diag
+
+

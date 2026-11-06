@@ -399,5 +399,101 @@ class TestCopilotTokenPrecedence(unittest.TestCase):
                 self.assertEqual(token, "gho_test_standalone_copilot")
 
 
+class TestDoctorDiagnostics(unittest.TestCase):
+    def test_check_redis_ok(self):
+        from doctor import check_redis
+        mock_redis_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.ping.return_value = True
+        mock_redis_cls.from_url.return_value = mock_instance
+
+        with patch("redis.Redis", mock_redis_cls):
+            res = check_redis("redis://fake:6379")
+            self.assertEqual(res["status"], "ok")
+            self.assertIn("latency_ms", res)
+
+    def test_check_redis_error(self):
+        from doctor import check_redis
+        mock_redis_cls = MagicMock()
+        mock_redis_cls.from_url.side_effect = ConnectionError("Mock connection refused")
+
+        with patch("redis.Redis", mock_redis_cls):
+            res = check_redis("redis://bad:6379")
+            self.assertEqual(res["status"], "error")
+            self.assertIn("Connection failed", res["message"])
+
+    def test_check_copilot_diagnostic(self):
+        from doctor import check_copilot
+
+        # Unconfigured
+        with patch("doctor._get_github_token", return_value=""):
+            res = check_copilot()
+            self.assertEqual(res["status"], "warning")
+            self.assertFalse(res["configured"])
+
+        # Configured with token
+        with patch("doctor._get_github_token", return_value="gho_1234567890abcdef"):
+            with patch("doctor.urllib.request.urlopen") as mock_urlopen:
+                mock_resp = MagicMock()
+                mock_resp.status = 200
+                mock_resp.read.return_value = json.dumps({"login": "testuser"}).encode()
+                mock_resp.__enter__.return_value = mock_resp
+                mock_urlopen.return_value = mock_resp
+
+                res = check_copilot()
+                self.assertEqual(res["status"], "ok")
+                self.assertTrue(res["configured"])
+                self.assertIn("@testuser", res["message"])
+
+    def test_check_antigravity_diagnostic(self):
+        from doctor import check_antigravity
+
+        # Missing token
+        with patch("doctor._find_agy_bin", return_value="/bin/sh"), \
+             patch("doctor._antigravity_token_check", return_value={"error": "missing"}):
+            res = check_antigravity()
+            self.assertEqual(res["status"], "warning")
+            self.assertIn("Session token missing", res["message"])
+
+        # Both bin and token OK
+        with patch("doctor._find_agy_bin", return_value="/bin/sh"), \
+             patch("doctor._antigravity_token_check", return_value=None):
+            res = check_antigravity()
+            self.assertEqual(res["status"], "ok")
+            self.assertTrue(res["configured"])
+
+    def test_format_doctor_report(self):
+        from doctor import run_diagnostics, format_doctor_report
+        with patch("doctor._get_github_token", return_value="gho_1234567890abcdef"), \
+             patch("doctor.urllib.request.urlopen", side_effect=Exception("offline")), \
+             patch("doctor._find_agy_bin", return_value="/bin/sh"), \
+             patch("doctor._antigravity_token_check", return_value=None):
+            diag = run_diagnostics()
+            report = format_doctor_report(diag, use_colors=False)
+            self.assertIn("Doctor", report)
+            self.assertIn("Copilot", report)
+            self.assertIn("Antigravity", report)
+            self.assertIn("Redis", report)
+
+    def test_doctor_api_endpoint(self):
+        from fastapi.testclient import TestClient
+        from api import app
+
+        with patch("api._get_valid_api_keys", return_value={"test-key"}), \
+             patch("api._extract_api_key", return_value="test-key"):
+            client = TestClient(app)
+            # Test JSON output
+            res_json = client.get("/v1/doctor", headers={"Authorization": "Bearer test-key"})
+            self.assertEqual(res_json.status_code, 200)
+            data = res_json.json()
+            self.assertIn("components", data)
+            self.assertIn("overall_status", data)
+
+            # Test Text output
+            res_txt = client.get("/v1/doctor?format=text", headers={"Authorization": "Bearer test-key"})
+            self.assertEqual(res_txt.status_code, 200)
+            self.assertIn("Doctor", res_txt.text)
+
+
 if __name__ == "__main__":
     unittest.main()
