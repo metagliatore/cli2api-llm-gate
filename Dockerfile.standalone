@@ -38,16 +38,15 @@ RUN ARCH="${TARGETARCH:-amd64}" \
     && echo "Fetching Antigravity manifest from ${MANIFEST_URL}..." \
     && TAR_URL=$(curl -fsSL "${MANIFEST_URL}" | jq -r '.url') \
     && echo "Downloading Antigravity CLI from ${TAR_URL}..." \
-    && mkdir -p /opt/antigravity/bin /root/.gemini/bin \
+    && mkdir -p /opt/antigravity/bin \
     && curl -fsSL "${TAR_URL}" | tar -xz -C /opt/antigravity/bin \
     && if [ -f /opt/antigravity/bin/antigravity ] && [ ! -f /opt/antigravity/bin/agy ]; then \
         ln -s /opt/antigravity/bin/antigravity /opt/antigravity/bin/agy; \
     fi \
     && chmod +x /opt/antigravity/bin/* \
-    && ln -s /opt/antigravity/bin/agy /usr/local/bin/agy \
-    && ln -s /opt/antigravity/bin/agy /root/.gemini/bin/agy
+    && ln -s /opt/antigravity/bin/agy /usr/local/bin/agy
 
-ENV PATH="/opt/antigravity/bin:/root/.gemini/bin:${PATH}"
+ENV PATH="/opt/antigravity/bin:${PATH}"
 
 # ----- Python dependencies -----
 WORKDIR /app

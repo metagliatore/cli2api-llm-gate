@@ -61,6 +61,12 @@ else
 fi
 
 # ── Google Antigravity Auth / Binary Check ─────────────────────────────────────
+# Ensure runtime symlink for /root/.gemini/bin/agy if /opt/antigravity/bin/agy exists
+if [ -d "/root/.gemini" ] && [ ! -e "/root/.gemini/bin/agy" ] && [ -x "/opt/antigravity/bin/agy" ]; then
+    mkdir -p /root/.gemini/bin 2>/dev/null || true
+    ln -sf /opt/antigravity/bin/agy /root/.gemini/bin/agy 2>/dev/null || true
+fi
+
 if [ "$PROVIDER" = "antigravity" ] || [ -d "/root/.gemini" ]; then
     if command -v agy >/dev/null 2>&1 || [ -x "/root/.gemini/bin/agy" ]; then
         echo "[entrypoint] Antigravity 'agy' CLI binary detected."
