@@ -23,6 +23,8 @@ import logging
 import sqlite3
 import subprocess
 import signal
+import queue
+import threading
 from typing import Optional, Union, List, Dict, Any, Generator, Tuple
 
 from files_store import (
@@ -578,7 +580,15 @@ def format_messages_for_antigravity(
         else:
             conversation_turns.append(f"{role.capitalize()}: {text}")
 
-    prompt_sections: List[str] = []
+    engine_directive = (
+        "[CRITICAL INFERENCE ENGINE DIRECTIVE]\n"
+        "You are acting strictly as an OpenAI-compatible Large Language Model inference engine.\n"
+        "DO NOT use any of your built-in tools (such as run_command, read_file, edit_file, etc.).\n"
+        "NEVER attempt to execute commands or inspect the host/container environment yourself.\n"
+        "When the user or client asks you to perform an action, do NOT run it internally: respond ONLY with text or, if tools are provided below, output a tool_calls JSON block for the external client to execute."
+    )
+
+    prompt_sections: List[str] = [engine_directive]
     if system_prompts:
         prompt_sections.append("[System Instructions]\n" + "\n\n".join(system_prompts))
 
@@ -602,7 +612,8 @@ def format_messages_for_antigravity(
         # Minify tool specifications to eliminate whitespace token bloat
         tools_minified = json.dumps(tools, separators=(',', ':'))
         tool_instruction = (
-            "[Available Tools]\n"
+            "[Available Tools for Client Execution]\n"
+            "The external client provides the following tools. DO NOT execute them internally.\n"
             f"{tools_minified}\n"
             "If invoking a tool, respond ONLY with:\n"
             "```json\n"
@@ -1469,8 +1480,40 @@ def chat_stream_antigravity(
     flushed_buffer = False
     error_msg = None
 
+    stdout_queue: queue.Queue = queue.Queue()
+
+    def _read_stdout():
+        try:
+            if proc.stdout:
+                for line in proc.stdout:
+                    stdout_queue.put(line)
+        except Exception as ex:
+            stdout_queue.put(ex)
+        finally:
+            stdout_queue.put(None)
+
+    stdout_reader = threading.Thread(target=_read_stdout, daemon=True)
+    stdout_reader.start()
+
+    HEARTBEAT_SECONDS = 10.0
+
     try:
-        for line in proc.stdout:
+        while True:
+            try:
+                line = stdout_queue.get(timeout=HEARTBEAT_SECONDS)
+            except queue.Empty:
+                if proc.poll() is not None and stdout_queue.empty():
+                    break
+                # Emit SSE comment heartbeat to keep HTTP socket active during deep model thinking
+                yield ": ping\n\n"
+                continue
+
+            if line is None:
+                break
+            if isinstance(line, Exception):
+                logger.warning("Error reading from agy stdout: %s", line)
+                break
+
             line = line.strip()
             if not line:
                 continue

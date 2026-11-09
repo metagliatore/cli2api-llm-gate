@@ -495,5 +495,18 @@ class TestDoctorDiagnostics(unittest.TestCase):
             self.assertIn("Doctor", res_txt.text)
 
 
+class TestHeartbeatAndAntiInception(unittest.TestCase):
+    def test_antigravity_anti_agent_directive(self):
+        prompt = format_messages_for_antigravity([{"role": "user", "content": "hello"}])
+        self.assertIn("[CRITICAL INFERENCE ENGINE DIRECTIVE]", prompt)
+        self.assertIn("NEVER attempt to execute commands", prompt)
+
+    def test_antigravity_tool_instruction_mentions_client_execution(self):
+        tools = [{"type": "function", "function": {"name": "test_tool", "parameters": {}}}]
+        prompt = format_messages_for_antigravity([{"role": "user", "content": "use tool"}], tools=tools)
+        self.assertIn("Available Tools for Client Execution", prompt)
+        self.assertIn("DO NOT execute them internally", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
