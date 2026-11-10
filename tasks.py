@@ -647,6 +647,35 @@ def format_messages_for_antigravity(
     return final_prompt
 
 
+def _extract_single_tool_call(tc: Any) -> Optional[Dict[str, Any]]:
+    """Extract and normalize a single tool call from flat or nested OpenAI dictionary format."""
+    if not isinstance(tc, dict):
+        return None
+    name = tc.get("name")
+    args = tc.get("arguments")
+    # Support nested OpenAI schema: {"id": "...", "type": "function", "function": {"name": "...", "arguments": ...}}
+    if (not name or not isinstance(name, str)) and isinstance(tc.get("function"), dict):
+        fn = tc["function"]
+        name = fn.get("name")
+        if args is None:
+            args = fn.get("arguments")
+    if not name or not isinstance(name, str) or not name.strip():
+        return None
+    name = name.strip()
+    if args is None:
+        args = {}
+    args_str = json.dumps(args) if isinstance(args, (dict, list)) else str(args)
+    tc_id = tc.get("id") if (tc.get("id") and isinstance(tc.get("id"), str)) else f"call_{uuid.uuid4().hex[:12]}"
+    return {
+        "id": tc_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": args_str,
+        },
+    }
+
+
 def parse_tool_calls_from_text(text: str) -> tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
     """
     Search for a tool_calls block in the model output.
@@ -663,20 +692,13 @@ def parse_tool_calls_from_text(text: str) -> tuple[Optional[str], Optional[List[
             if isinstance(data, dict) and "tool_calls" in data and isinstance(data["tool_calls"], list):
                 tool_calls = []
                 for tc in data["tool_calls"]:
-                    name = tc.get("name")
-                    args = tc.get("arguments", {})
-                    args_str = json.dumps(args) if isinstance(args, (dict, list)) else str(args)
-                    tool_calls.append({
-                        "id": f"call_{uuid.uuid4().hex[:12]}",
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": args_str,
-                        },
-                    })
-                # Remove the parsed tool call block from content
-                cleaned = re.sub(r"```(?:json)?\s*" + re.escape(block.strip()) + r"\s*```", "", text).strip()
-                return (cleaned if cleaned else None), tool_calls
+                    parsed = _extract_single_tool_call(tc)
+                    if parsed:
+                        tool_calls.append(parsed)
+                if tool_calls:
+                    # Remove the parsed tool call block from content
+                    cleaned = re.sub(r"```(?:json)?\s*" + re.escape(block.strip()) + r"\s*```", "", text).strip()
+                    return (cleaned if cleaned else None), tool_calls
         except json.JSONDecodeError:
             continue
 
@@ -686,18 +708,11 @@ def parse_tool_calls_from_text(text: str) -> tuple[Optional[str], Optional[List[
         if isinstance(data, dict) and "tool_calls" in data and isinstance(data["tool_calls"], list):
             tool_calls = []
             for tc in data["tool_calls"]:
-                name = tc.get("name")
-                args = tc.get("arguments", {})
-                args_str = json.dumps(args) if isinstance(args, (dict, list)) else str(args)
-                tool_calls.append({
-                    "id": f"call_{uuid.uuid4().hex[:12]}",
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": args_str,
-                    },
-                })
-            return None, tool_calls
+                parsed = _extract_single_tool_call(tc)
+                if parsed:
+                    tool_calls.append(parsed)
+            if tool_calls:
+                return None, tool_calls
     except json.JSONDecodeError:
         pass
 
@@ -1110,6 +1125,7 @@ def ask_antigravity(
             capture_output=True,
             text=True,
             timeout=180,
+            cwd="/tmp",
             env=_get_subprocess_env(),
         )
     except FileNotFoundError:
@@ -1251,6 +1267,7 @@ def chat_complete_antigravity(
             capture_output=True,
             text=True,
             timeout=180,
+            cwd="/tmp",
             env=_get_subprocess_env(),
         )
     except FileNotFoundError:
@@ -1439,6 +1456,7 @@ def chat_stream_antigravity(
             text=True,
             bufsize=1,
             start_new_session=True,
+            cwd="/tmp",
             env=_get_subprocess_env(),
         )
 
@@ -1495,7 +1513,26 @@ def chat_stream_antigravity(
     stdout_reader = threading.Thread(target=_read_stdout, daemon=True)
     stdout_reader.start()
 
-    HEARTBEAT_SECONDS = 10.0
+    last_yield_time = time.time()
+    HEARTBEAT_SECONDS = 5.0
+    KEEP_ALIVE_INTERVAL = 10.0
+
+    def _make_liveness_chunk() -> str:
+        k_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": chosen_model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": None,
+            }],
+        }
+        if active_conv_id:
+            k_chunk["conversation_id"] = active_conv_id
+            k_chunk["system_fingerprint"] = active_conv_id
+        return f"data: {json.dumps(k_chunk)}\n\n"
 
     try:
         while True:
@@ -1504,8 +1541,13 @@ def chat_stream_antigravity(
             except queue.Empty:
                 if proc.poll() is not None and stdout_queue.empty():
                     break
-                # Emit SSE comment heartbeat to keep HTTP socket active during deep model thinking
-                yield ": ping\n\n"
+                now = time.time()
+                if now - last_yield_time >= KEEP_ALIVE_INTERVAL:
+                    # Emit SSE comment heartbeat for socket/proxy keep-alive
+                    yield ": ping\n\n"
+                    # Emit empty OpenAI chunk to keep client stream watchdogs (e.g. Hermes StreamingWaitMonitor) alive
+                    yield _make_liveness_chunk()
+                    last_yield_time = now
                 continue
 
             if line is None:
@@ -1517,6 +1559,14 @@ def chat_stream_antigravity(
             line = line.strip()
             if not line:
                 continue
+
+            # Emit keep-alives during processing or token buffering if interval elapsed
+            now = time.time()
+            if now - last_yield_time >= KEEP_ALIVE_INTERVAL:
+                yield ": ping\n\n"
+                yield _make_liveness_chunk()
+                last_yield_time = now
+
             try:
                 event_data = json.loads(line)
             except json.JSONDecodeError:
@@ -1550,6 +1600,7 @@ def chat_stream_antigravity(
                         chunk["conversation_id"] = active_conv_id
                         chunk["system_fingerprint"] = active_conv_id
                     yield f"data: {json.dumps(chunk)}\n\n"
+                    last_yield_time = time.time()
                 else:
                     # In tool mode: buffer until we know if it is a tool call or plain text
                     if not flushed_buffer and not detected_tool_call:
@@ -1575,6 +1626,7 @@ def chat_stream_antigravity(
                                 chunk["conversation_id"] = active_conv_id
                                 chunk["system_fingerprint"] = active_conv_id
                             yield f"data: {json.dumps(chunk)}\n\n"
+                            last_yield_time = time.time()
                     elif flushed_buffer:
                         chunk = {
                             "id": completion_id,
@@ -1592,6 +1644,7 @@ def chat_stream_antigravity(
                             chunk["conversation_id"] = active_conv_id
                             chunk["system_fingerprint"] = active_conv_id
                         yield f"data: {json.dumps(chunk)}\n\n"
+                        last_yield_time = time.time()
 
             elif evt == "result":
                 res = event_data.get("result", {})

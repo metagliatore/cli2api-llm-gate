@@ -507,6 +507,70 @@ class TestHeartbeatAndAntiInception(unittest.TestCase):
         self.assertIn("Available Tools for Client Execution", prompt)
         self.assertIn("DO NOT execute them internally", prompt)
 
+    def test_parse_tool_calls_nested_openai_format(self):
+        from tasks import parse_tool_calls_from_text
+        nested_json = (
+            "Here is the plan:\n"
+            "```json\n"
+            "{\n"
+            '  "tool_calls": [\n'
+            '    {\n'
+            '      "id": "call_abc123",\n'
+            '      "type": "function",\n'
+            '      "function": {\n'
+            '        "name": "search_files",\n'
+            '        "arguments": "{\\"pattern\\": \\"visita\\"}"\n'
+            '      }\n'
+            '    }\n'
+            '  ]\n'
+            "}\n"
+            "```\n"
+        )
+        cleaned, tcs = parse_tool_calls_from_text(nested_json)
+        self.assertEqual(cleaned, "Here is the plan:")
+        self.assertIsNotNone(tcs)
+        self.assertEqual(len(tcs), 1)
+        self.assertEqual(tcs[0]["id"], "call_abc123")
+        self.assertEqual(tcs[0]["function"]["name"], "search_files")
+        self.assertEqual(tcs[0]["function"]["arguments"], '{"pattern": "visita"}')
+
+    def test_parse_tool_calls_flat_format(self):
+        from tasks import parse_tool_calls_from_text
+        flat_json = (
+            "```json\n"
+            "{\n"
+            '  "tool_calls": [\n'
+            '    {\n'
+            '      "name": "terminal",\n'
+            '      "arguments": {"command": "ls -la"}\n'
+            '    }\n'
+            '  ]\n'
+            "}\n"
+            "```"
+        )
+        cleaned, tcs = parse_tool_calls_from_text(flat_json)
+        self.assertIsNone(cleaned)
+        self.assertIsNotNone(tcs)
+        self.assertEqual(len(tcs), 1)
+        self.assertEqual(tcs[0]["function"]["name"], "terminal")
+        self.assertIn("command", tcs[0]["function"]["arguments"])
+
+    def test_parse_tool_calls_empty_name_ignored(self):
+        from tasks import parse_tool_calls_from_text
+        bad_json = (
+            "```json\n"
+            "{\n"
+            '  "tool_calls": [\n'
+            '    {\n'
+            '      "function": {"name": "", "arguments": "{}"}\n'
+            '    }\n'
+            '  ]\n'
+            "}\n"
+            "```"
+        )
+        cleaned, tcs = parse_tool_calls_from_text(bad_json)
+        self.assertIsNone(tcs)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -85,6 +85,25 @@ if [ "$PROVIDER" = "antigravity" ] || [ -d "/root/.gemini" ]; then
             echo "[entrypoint] Antigravity session token detected."
         fi
     fi
+
+    # Ensure Antigravity Gateway Rule in /root/.gemini/config/GEMINI.md to prevent internal tool execution
+    mkdir -p /root/.gemini/config 2>/dev/null || true
+    cat << 'EOF' > /root/.gemini/config/GEMINI.md
+# Antigravity Gateway Rule
+
+You are operating as an API backend inference engine for external AI agents and clients (OpenAI API format).
+
+CRITICAL CONSTRAINTS:
+1. NEVER invoke your internal tools (run_command, read_file, write_file, edit_file, etc.).
+2. NEVER attempt to inspect or execute commands in the host or container environment.
+3. If the prompt provides [Available Tools for Client Execution]:
+   - If you decide to call any tool, output ONLY a JSON code block with "tool_calls":
+     ```json
+     {"tool_calls": [{"id": "call_...", "type": "function", "function": {"name": "<tool_name>", "arguments": "{\"param\": \"val\"}"}}]}
+     ```
+   - The calling client executes the tool on its own machine.
+4. If no tools are needed, respond directly with text.
+EOF
 fi
 
 exec "$@"
